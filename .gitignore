@@ -1,0 +1,12 @@
+.pio
+.vscode/
+.idea/
+
+**/*.bin
+**/*.elf
+**/*.o
+**/*.a
+internal/
+dist/
+build/
+output/
