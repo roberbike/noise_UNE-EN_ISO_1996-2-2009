@@ -322,11 +322,20 @@ void adc_task(void *pvParameters) {
         samples_count = 0;
         stat_idx = 0;
 
+        // Monitoring
+        // Serial.printf("Max Loop Time: %lu us\n", max_loop_time);
+        // max_loop_time = 0;
+
         vTaskDelay(pdMS_TO_TICKS(1));
         next_sample_time = micros();
       }
     }
+
+    // Performance Check
+    // unsigned long t0 = micros();
     yield();
+    // unsigned long t1 = micros();
+    // if (t1 - t0 > 45) { Serial.println("WARN: CPU Overload in yield"); }
   }
 }
 
@@ -345,7 +354,7 @@ void receiveEvent(int bytes) {
 
       struct timeval tv = {(long)timestamp, 0};
       settimeofday(&tv, NULL);
-      Serial.printf("[I2C] Time synced to %lu\n", timestamp);
+      // Serial.printf removed to avoid blocking in ISR/Callback context
     }
 
     while (Wire.available())
@@ -386,6 +395,8 @@ void requestEvent() {
     break;
   }
 }
+
+// ... (código existente)
 
 // ... (código existente)
 
