@@ -147,8 +147,8 @@ void adc_task(void *pvParameters) {
 #else
   // Configuración estándar para ESP32 / C3 (12 bits ADC)
   adc1_config_width(ADC_WIDTH_BIT_12);
-  adc1_config_channel_atten(ADC_CHANNEL, ADC_ATTEN_DB_11);
-  esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN_DB_11, ADC_WIDTH_BIT_12,
+  adc1_config_channel_atten(ADC_CHANNEL, ADC_ATTEN_DB_12);
+  esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN_DB_12, ADC_WIDTH_BIT_12,
                            REF_VOLTAGE, &adc_chars);
 #endif
 
@@ -401,7 +401,7 @@ void ruido_setup() {
   Wire.onRequest(requestEvent);
 
   // Initialize I2C as Slave at default address 0x08
-  Wire.begin(I2C_ADDR_SLAVE, I2C_SDA, I2C_SCL);
+  Wire.begin((uint8_t)I2C_ADDR_SLAVE, I2C_SDA, I2C_SCL);
   Wire.setClock(100000);
 
   // Create ADC/DSP task on a dedicated core (ESP32-C3 has one core, but
@@ -413,7 +413,5 @@ void ruido_loop() { delay(10000); }
 
 // Si se compila como firmware independiente, se puede descomentar esto o usar
 // flags
-#if defined(BUILD_RUIDO_FIRMWARE)
 void setup() { ruido_setup(); }
 void loop() { ruido_loop(); }
-#endif
