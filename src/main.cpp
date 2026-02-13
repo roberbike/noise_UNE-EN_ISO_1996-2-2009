@@ -18,7 +18,7 @@
 #define I2C_SCL 10
 
 #define ADC_CHANNEL ADC1_CHANNEL_4 // GPIO 4
-#define SAMPLE_RATE 22050          // High quality sampling
+#define SAMPLE_RATE 16000          // Reduced sampling to avoid I2C blocking
 #define SAMPLE_PERIOD_US (1000000 / SAMPLE_RATE)
 
 // Calibration constants
@@ -33,11 +33,11 @@ struct Biquad {
   float z1, z2;
 };
 
-// A-Weighting Filter (Cascaded Biquads for 22050 Hz)
+// A-Weighting Filter (Cascaded Biquads for 16000 Hz)
 Biquad aWeightingFilters[3] = {
-    {0.5367f, -1.0734f, 0.5367f, -1.1892f, 0.3165f, 0, 0},
-    {1.0000f, 2.0000f, 1.0000f, -1.5434f, 0.5891f, 0, 0},
-    {1.0000f, 0.0000f, -1.0000f, -1.9772f, 0.9773f, 0, 0}};
+    {0.529093f, -1.058186f, 0.529093f, -1.983887f, 0.983952f, 0, 0},
+    {1.000000f, -2.000000f, 1.000000f, -1.705510f, 0.715988f, 0, 0},
+    {1.000000f, 2.000000f, 1.000000f, 0.821564f, 0.168742f, 0, 0}};
 
 float applyFilter(float in, Biquad &f) {
   float out = in * f.b0 + f.z1;
@@ -160,10 +160,10 @@ void adc_task(void *pvParameters) {
   float max_fast_sq = 0.0f;
   float max_slow_sq = 0.0f;
 
-  // EMA Alpha coefficients for Time Weighting (at 22050 Hz)
+  // EMA Alpha coefficients for Time Weighting (at 16000 Hz)
   // Alpha = 1 - exp(-1 / (sample_rate * time_constant))
-  const float alpha_fast = 0.000362f; // Fast = 125ms
-  const float alpha_slow = 0.000045f; // Slow = 1s
+  const float alpha_fast = 0.000500f; // Fast = 125ms
+  const float alpha_slow = 0.000062f; // Slow = 1s
 
   int samples_count = 0;
   int sub_sample_trigger = SAMPLE_RATE / STAT_SAMPLES;
