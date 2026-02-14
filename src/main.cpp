@@ -5,6 +5,7 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <math.h>
+#include <string.h>
 
 /**
  * --- ESP32-C3 PROFESSIONAL NOISE MONITOR ---
@@ -22,8 +23,8 @@
 #define SAMPLE_PERIOD_US (1000000 / SAMPLE_RATE)
 
 // Calibration constants
-#define CALIBRATION_DB 52.5f      // Target dB (Calibrator)
-#define CALIBRATION_RMS_MV 168.0f // Measured RMS mV at 94dB
+#define CALIBRATION_DB 94.0f      // Target dB (Calibrator)
+#define CALIBRATION_RMS_MV 166.0f // Measured RMS mV at 94dB
 #define REF_VOLTAGE 1100          // ADC Ref (mV)
 
 // --- DSP STRUCTURES ---
@@ -46,11 +47,13 @@ float applyFilter(float in, Biquad &f) {
   return out;
 }
 
-// Protocol Commands (Sync with SensorLib/NoiseSlave.h)
-#define CMD_GET_STATUS 0x00
+// Protocol Commands
+#define CMD_GET_STATUS 0x20
+#define CMD_GET_STATUS_LEGACY 0x00
 #define CMD_GET_DATA 0x01
-#define CMD_RESET 0x08
 #define CMD_IDENTIFY 0x09
+// Compatibility alias: legacy masters may send timestamp using 0x09 + 4 bytes.
+#define CMD_SET_TIME_LEGACY CMD_IDENTIFY
 
 // Mapping for secondary/Legacy commands
 #define CMD_LEGACY_GET_DB 0x10
@@ -91,6 +94,28 @@ volatile float L90_1s = 0.0f;
 volatile uint32_t last_rms_mv = 0;
 volatile bool mic_connected = false;
 volatile uint8_t i2c_active_command = CMD_GET_STATUS;
+portMUX_TYPE g_data_mux = portMUX_INITIALIZER_UNLOCKED;
+
+static inline void update_i2c_command(uint8_t cmd) {
+  portENTER_CRITICAL(&g_data_mux);
+  i2c_active_command = cmd;
+  portEXIT_CRITICAL(&g_data_mux);
+}
+
+static inline uint8_t read_i2c_command() {
+  portENTER_CRITICAL(&g_data_mux);
+  uint8_t cmd = i2c_active_command;
+  portEXIT_CRITICAL(&g_data_mux);
+  return cmd;
+}
+
+static inline SensorData snapshot_sensor_data() {
+  SensorData copy;
+  portENTER_CRITICAL(&g_data_mux);
+  memcpy(&copy, (const void *)&globalSensorData, sizeof(SensorData));
+  portEXIT_CRITICAL(&g_data_mux);
+  return copy;
+}
 
 // --- NOISE PERIOD STATISTICS (DECRETO 213/2012) ---
 struct PeriodStats {
@@ -167,7 +192,14 @@ void adc_task(void *pvParameters) {
 
   int samples_count = 0;
   int sub_sample_trigger = SAMPLE_RATE / STAT_SAMPLES;
-  float dc_offset = 2048.0f; // Approx midway
+  if (sub_sample_trigger < 1) {
+    sub_sample_trigger = 1;
+  }
+#if defined(ESP32S2) || defined(CONFIG_IDF_TARGET_ESP32S2)
+  float dc_offset = 4096.0f;
+#else
+  float dc_offset = 2048.0f;
+#endif
 
   SerialLog("SYS", "Smart City DSP Engine V2.1 (Clase 2 Support)");
 
@@ -221,19 +253,29 @@ void adc_task(void *pvParameters) {
         uint32_t voltage_slow_max = esp_adc_cal_raw_to_voltage(
             (uint32_t)sqrtf(max_slow_sq), &adc_chars);
 
-        last_rms_mv = voltage_rms_A;
+        float laeq_local = 0.0f;
+        float lafmax_local = 0.0f;
+        float lasmax_local = 0.0f;
+        float l10_local = 0.0f;
+        float l90_local = 0.0f;
 
-        if (voltage_rms_A > 0 && CALIBRATION_RMS_MV > 0.0f) {
-          LAeq_1s = 20.0f * log10((float)voltage_rms_A / CALIBRATION_RMS_MV) +
-                    CALIBRATION_DB;
-          LAFmax_1s =
+        SensorData prev_data = snapshot_sensor_data();
+        float ld_local = prev_data.Ld;
+        float le_local = prev_data.Le;
+        float ln_local = prev_data.Ln;
+        float lden_local = prev_data.noiseLden;
+
+        bool valid_sample = (voltage_rms_A > 0 && CALIBRATION_RMS_MV > 0.0f);
+        if (valid_sample) {
+          laeq_local = 20.0f * log10((float)voltage_rms_A / CALIBRATION_RMS_MV) +
+                       CALIBRATION_DB;
+          lafmax_local =
               20.0f * log10((float)voltage_fast_max / CALIBRATION_RMS_MV) +
               CALIBRATION_DB;
-          LASmax_1s =
+          lasmax_local =
               20.0f * log10((float)voltage_slow_max / CALIBRATION_RMS_MV) +
               CALIBRATION_DB;
 
-          // Process L10/L90
           if (stat_idx > 0) {
             for (int i = 0; i < stat_idx - 1; i++) {
               for (int j = i + 1; j < stat_idx; j++) {
@@ -244,51 +286,37 @@ void adc_task(void *pvParameters) {
                 }
               }
             }
-            L10_1s = stat_buffer[STAT_SAMPLES / 10];
-            L90_1s = stat_buffer[STAT_SAMPLES * 9 / 10];
+            l10_local = stat_buffer[STAT_SAMPLES / 10];
+            l90_local = stat_buffer[STAT_SAMPLES * 9 / 10];
           }
 
-          // Fill SensorLib Structure
-          globalSensorData.noise = voltage_rms_A;
-          globalSensorData.noiseAvg = (float)voltage_rms_A;
-          globalSensorData.noiseAvgDb = LAeq_1s; // Main metric
-          globalSensorData.noisePeak = (float)voltage_fast_max;
-          globalSensorData.noisePeakDb = LAFmax_1s;
-          globalSensorData.noiseAvgLegal =
-              L10_1s; // Mapping L10 to legal average
-          globalSensorData.noiseAvgLegalDb = L10_1s;
-          globalSensorData.lowNoiseLevel = (uint16_t)L90_1s;
-          globalSensorData.cycles++;
-
-          // --- LONG TERM PERIODS (DECRETO 213/2012) ---
+          // Long-term period accumulation (non-blocking call).
           struct tm timeinfo;
-          if (getLocalTime(&timeinfo)) {
+          if (getLocalTime(&timeinfo, 0)) {
             int h = timeinfo.tm_hour;
-            if (h >= 7 && h < 19)
-              statsDay.add(LAeq_1s);
-            else if (h >= 19 && h < 23)
-              statsEvening.add(LAeq_1s);
-            else
-              statsNight.add(LAeq_1s);
+            if (h >= 7 && h < 19) {
+              statsDay.add(laeq_local);
+            } else if (h >= 19 && h < 23) {
+              statsEvening.add(laeq_local);
+            } else {
+              statsNight.add(laeq_local);
+            }
 
-            globalSensorData.Ld = statsDay.getAvg();
-            globalSensorData.Le = statsEvening.getAvg();
-            globalSensorData.Ln = statsNight.getAvg();
+            ld_local = statsDay.getAvg();
+            le_local = statsEvening.getAvg();
+            ln_local = statsNight.getAvg();
 
-            // Lden calculation
-            double l_d = (double)globalSensorData.Ld;
-            double l_e = (double)globalSensorData.Le;
-            double l_n = (double)globalSensorData.Ln;
-
+            double l_d = (double)ld_local;
+            double l_e = (double)le_local;
+            double l_n = (double)ln_local;
             if (l_d > 0 || l_e > 0 || l_n > 0) {
               double lden_energy = (12.0 * pow(10.0, l_d / 10.0) +
                                     4.0 * pow(10.0, (l_e + 5.0) / 10.0) +
                                     8.0 * pow(10.0, (l_n + 10.0) / 10.0)) /
                                    24.0;
-              globalSensorData.noiseLden = (float)(10.0 * log10(lden_energy));
+              lden_local = (float)(10.0 * log10(lden_energy));
             }
 
-            // Daily reset at midnight
             static int last_day = -1;
             if (last_day != -1 && last_day != timeinfo.tm_mday) {
               statsDay.reset();
@@ -297,20 +325,45 @@ void adc_task(void *pvParameters) {
             }
             last_day = timeinfo.tm_mday;
           }
-
-        } else {
-          LAeq_1s = LAFmax_1s = LASmax_1s = L10_1s = L90_1s = 0.0f;
         }
 
         // Connectivity check
         uint32_t bias_mv =
             esp_adc_cal_raw_to_voltage((uint32_t)dc_offset, &adc_chars);
-        mic_connected = check_microphone_connection(bias_mv);
+        bool mic_ok_local = check_microphone_connection(bias_mv);
 
-        if (mic_connected) {
+        portENTER_CRITICAL(&g_data_mux);
+        last_rms_mv = voltage_rms_A;
+        LAeq_1s = laeq_local;
+        LAFmax_1s = lafmax_local;
+        LASmax_1s = lasmax_local;
+        L10_1s = l10_local;
+        L90_1s = l90_local;
+        mic_connected = mic_ok_local;
+
+        globalSensorData.noise = valid_sample ? voltage_rms_A : 0;
+        globalSensorData.noiseAvg = valid_sample ? (float)voltage_rms_A : 0.0f;
+        globalSensorData.noiseAvgDb = laeq_local;
+        globalSensorData.noisePeak = valid_sample ? (float)voltage_fast_max : 0.0f;
+        globalSensorData.noisePeakDb = lafmax_local;
+        globalSensorData.noiseMin = valid_sample ? (float)voltage_rms_A : 0.0f;
+        globalSensorData.noiseMinDb = laeq_local;
+        globalSensorData.noiseAvgLegal = l10_local;
+        globalSensorData.noiseAvgLegalDb = l10_local;
+        globalSensorData.noiseAvgLegalMax = valid_sample ? (float)voltage_fast_max : 0.0f;
+        globalSensorData.noiseAvgLegalMaxDb = lafmax_local;
+        globalSensorData.lowNoiseLevel = (l90_local > 0.0f) ? (uint16_t)l90_local : 0;
+        globalSensorData.Ld = ld_local;
+        globalSensorData.Le = le_local;
+        globalSensorData.Ln = ln_local;
+        globalSensorData.noiseLden = lden_local;
+        globalSensorData.cycles++;
+        portEXIT_CRITICAL(&g_data_mux);
+
+        if (mic_ok_local) {
           Serial.printf("[SMART] LAeq:%.1f | LAFmx:%.1f | L10:%.1f | L90:%.1f "
                         "| RMS:%dmV\n",
-                        LAeq_1s, LAFmax_1s, L10_1s, L90_1s, voltage_rms_A);
+                        laeq_local, lafmax_local, l10_local, l90_local, voltage_rms_A);
         } else {
           SerialLog("WARN", "Microphone range error (check wiring)");
         }
@@ -341,79 +394,107 @@ void adc_task(void *pvParameters) {
 
 // --- I2C SLAVE ---
 void receiveEvent(int bytes) {
-  if (Wire.available() > 0) {
-    uint8_t cmd = Wire.read();
-    i2c_active_command = cmd;
+  if (Wire.available() <= 0) {
+    return;
+  }
 
-    // CMD_SET_TIME (0x09) support: expects 4-byte Unix Timestamp
-    if (cmd == CMD_IDENTIFY && bytes == 5) {
-      uint32_t timestamp = 0;
-      uint8_t *p = (uint8_t *)&timestamp;
-      for (int i = 0; i < 4 && Wire.available(); i++)
-        p[i] = Wire.read();
+  uint8_t cmd = Wire.read();
+  if (cmd == CMD_GET_STATUS_LEGACY) {
+    cmd = CMD_GET_STATUS;
+  }
+  update_i2c_command(cmd);
 
-      struct timeval tv = {(long)timestamp, 0};
-      settimeofday(&tv, NULL);
-      // Serial.printf removed to avoid blocking in ISR/Callback context
+  // Compatibility path: set Unix epoch via 0x09 + 4 bytes.
+  if (cmd == CMD_SET_TIME_LEGACY && bytes == 5) {
+    uint32_t timestamp = 0;
+    uint8_t *p = (uint8_t *)&timestamp;
+    for (int i = 0; i < 4 && Wire.available(); i++) {
+      p[i] = Wire.read();
     }
+    struct timeval tv = {(long)timestamp, 0};
+    settimeofday(&tv, NULL);
+  }
 
-    while (Wire.available())
-      Wire.read(); // Flush
+  while (Wire.available()) {
+    Wire.read();
   }
 }
 
 void requestEvent() {
-  switch (i2c_active_command) {
-  case CMD_GET_STATUS: {
-    uint8_t s = mic_connected ? 1 : 0;
-    Wire.write(&s, 1);
-  } break;
+  uint8_t cmd = read_i2c_command();
+  SensorData data;
+  float laeq;
+  float lafmax;
+  float l10;
+  float l90;
+  uint32_t rms_mv;
+  uint8_t mic_ok;
+
+  portENTER_CRITICAL(&g_data_mux);
+  memcpy(&data, (const void *)&globalSensorData, sizeof(SensorData));
+  laeq = LAeq_1s;
+  lafmax = LAFmax_1s;
+  l10 = L10_1s;
+  l90 = L90_1s;
+  rms_mv = last_rms_mv;
+  mic_ok = mic_connected ? 1 : 0;
+  portEXIT_CRITICAL(&g_data_mux);
+
+  switch (cmd) {
+  case CMD_GET_STATUS:
+    Wire.write(&mic_ok, 1);
+    break;
   case CMD_GET_DATA:
-    Wire.write((uint8_t *)&globalSensorData, sizeof(SensorData));
+    Wire.write((uint8_t *)&data, sizeof(SensorData));
     break;
   case CMD_IDENTIFY: {
     uint8_t id[5] = {0x01, 0x02, 0x01, 0x01, I2C_ADDR_SLAVE};
     Wire.write(id, 5);
   } break;
   case CMD_LEGACY_GET_DB:
-    Wire.write((uint8_t *)&LAeq_1s, 4);
+    Wire.write((uint8_t *)&laeq, 4);
     break;
-  case 0x30: // Legacy RAW MV
-    Wire.write((uint8_t *)&last_rms_mv, 4);
+  case 0x30:
+    Wire.write((uint8_t *)&rms_mv, 4);
     break;
-  case 0x40: // Legacy Lmax
-    Wire.write((uint8_t *)&LAFmax_1s, 4);
+  case 0x40:
+    Wire.write((uint8_t *)&lafmax, 4);
     break;
   case CMD_LEGACY_GET_L10:
-    Wire.write((uint8_t *)&L10_1s, 4);
+    Wire.write((uint8_t *)&l10, 4);
     break;
   case CMD_LEGACY_GET_L90:
-    Wire.write((uint8_t *)&L90_1s, 4);
+    Wire.write((uint8_t *)&l90, 4);
     break;
   default:
-    Wire.write(0);
+    Wire.write((uint8_t)0);
     break;
   }
 }
 
-// ... (código existente)
-
-// ... (código existente)
-
-// Renombrando para evitar conflictos si se usa como librería
-// Renombrando para evitar conflictos si se usa como librería
-
+// Namespaced entry points to reduce conflicts when embedded as a library.
 void ruido_setup() {
   Serial.begin(115200);
   delay(1000);
   SerialLog("INIT", "Smart City Noise Sensor (Clase 2 Ready)");
 
+  // Initialize I2C as Slave (robust across Arduino-ESP32 core versions)
+  bool pins_ok = Wire.setPins(I2C_SDA, I2C_SCL);
+  bool i2c_ok = pins_ok && Wire.begin((uint8_t)I2C_ADDR_SLAVE);
+  Wire.setClock(100000);
   Wire.onReceive(receiveEvent);
   Wire.onRequest(requestEvent);
 
-  // Initialize I2C as Slave at default address 0x08
-  Wire.begin((uint8_t)I2C_ADDR_SLAVE, I2C_SDA, I2C_SCL);
-  Wire.setClock(100000);
+  if (pins_ok && i2c_ok) {
+    Serial.printf("[INIT] I2C Slave OK addr=0x%02X SDA=%d SCL=%d\n",
+                  I2C_ADDR_SLAVE, I2C_SDA, I2C_SCL);
+  } else if (!pins_ok) {
+    Serial.printf("[ERR] I2C pin config failed SDA=%d SCL=%d\n", I2C_SDA,
+                  I2C_SCL);
+  } else {
+    Serial.printf("[ERR] I2C Slave init failed addr=0x%02X SDA=%d SCL=%d\n",
+                  I2C_ADDR_SLAVE, I2C_SDA, I2C_SCL);
+  }
 
   // Create ADC/DSP task on a dedicated core (ESP32-C3 has one core, but
   // FreeRTOS handles scheduling)
@@ -426,3 +507,4 @@ void ruido_loop() { delay(10000); }
 // flags
 void setup() { ruido_setup(); }
 void loop() { ruido_loop(); }
+

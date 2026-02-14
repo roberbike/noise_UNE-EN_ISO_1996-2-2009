@@ -1,37 +1,44 @@
-# Informe de Calidad del Código (Code Quality Assurance)
+# Code Quality Report
 
-## 1. Resumen Ejecutivo
-El firmware implementa un medidor de nivel sonoro (SPL) para ESP32-C3 utilizando FreeRTOS y ADC directo. La arquitectura es robusta, separando la adquisición de datos (Task 20kHz) de la comunicación (I2C Interrupts).
+Date: 2026-02-14
 
-## 2. Hallazgos Críticos (Critical Issues)
+## Scope
+Reviewed:
+- `src/main.cpp` (ESP32-C3 slave firmware)
+- `examples/src/main.cpp` (ESP32-S2/S3 master example)
+- `README.md`, `examples/README.md`
 
-### 🔴 1. Mapeo de Pines I2C (Hardware Mismatch)
-**Severidad: ALTA**
-Detectado cambio de placa a `lolin_c3_mini`.
-- **Código actual**: `Wire.begin(ADDR, 8, 9)` (Estándar C3).
-- **Hardware Lolin C3 Mini**: SDA = GPIO 8, **SCL = GPIO 10**. (GPIO 9 es botón de Boot en esta placa y puede causar conflictos).
-- **Acción**: Se debe actualizar la iniciación del bus I2C.
+## Findings and Fixes Applied
 
-### 🟠 2. Latencia en Interrupción I2C
-**Severidad: MEDIA**
-El uso de `SerialLog` (Serial.print) dentro de `requestEvent` y `receiveEvent` es peligroso.
-- Estas funciones se ejecutan en contexto de alta prioridad/interrupción del driver I2C.
-- `Serial.print` bloquea y es lento. Puede causar *Clock Stretching* excesivo, haciendo que el Maestro falle (timeout) o que el ESP32 se reinicie por Watchdog.
-- **Acción**: Eliminar logs del callback I2C o usar banderas.
+1. I2C callback data races (high)
+- Problem: slave DSP task updated shared metrics while I2C callbacks could read partially updated values.
+- Fix: added critical-section protection for shared state and atomic snapshot copies before `Wire.write`.
 
-### 🟡 3. Ponderación de Frecuencia (A-Weighting)
-**Severidad: MEDIA (Funcional)**
-La norma UNE-EN ISO 1996-2 exige **LAeq** (Ponderación A).
-- **Estado Actual**: El código calcula RMS plano (Lineal / Z-Weighting).
-- **Impacto**: Las mediciones serán más altas de lo real en frecuencias bajas (graves), ya que el oído humano (y la curva A) atenúa los bajos.
-- **Acción**: Se añadirá una nota de limitación técnica o una implementación básica de filtro A si el CPU lo permite. Dado el requisito de "medida de lo posible", se mantendrá como LZeq (Lineal) pero renombrando variables para precisión técnica, o aplicando una corrección simple.
+2. Potential blocking time call in DSP loop (high)
+- Problem: `getLocalTime(&timeinfo)` can block; this risks starving real-time sampling.
+- Fix: changed to non-blocking `getLocalTime(&timeinfo, 0)`.
 
-## 3. Revisión de Estilo y Naming
-- **Clean Code**: Estructura excelente. Uso de `#define` correcto.
-- **Tasks**: Uso correcto de `xTaskCreate` pinned (aunque C3 es single core, `PinnedToCore` es seguro).
-- **Log**: Sistema de log centralizado implementado correctamente.
+3. Protocol clarity and compatibility (medium)
+- Problem: mixed use of status command values (`0x20` vs `0x00`) and ambiguous docs.
+- Fix: slave keeps modern command `0x20` and maps legacy `0x00`; master now uses `0x20` with legacy fallback.
 
-## 4. Plan de Corrección
-1. Corregir pines I2C para Lolin C3 Mini (8, 10).
-2. Eliminar `SerialLog` de los eventos I2C.
-3. Refinar comentarios sobre A-Weighting.
+4. Incomplete payload fields (medium)
+- Problem: some `SensorData` fields remained stale/zero despite valid samples.
+- Fix: now updates min/legal-max fields consistently and keeps long-term values coherent.
+
+5. Sampling robustness edge case (low)
+- Problem: `sub_sample_trigger` could be zero if config changed.
+- Fix: added lower bound to `>= 1`.
+
+6. Documentation drift (medium)
+- Problem: docs had outdated addresses/commands/interval and encoding artifacts.
+- Fix: rewrote root and example READMEs with current wiring, protocol, and behavior.
+
+## Residual Risks
+- `CMD_IDENTIFY (0x09)` is still dual-use for identify and legacy set-time, differentiated by payload length.
+- Calibration constants must be validated in deployment environment.
+
+## Recommended Next Validation
+1. Build both projects in PlatformIO and verify no warnings/errors.
+2. Run master/slave on hardware and confirm stable `cycles` increments and expected `GET_DATA` parsing.
+3. Validate calibration with reference source and document final constants.

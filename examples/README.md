@@ -1,21 +1,36 @@
-# Master XIAO ESP32-S3 - Lector de Ruido
+# Master Example (ESP32-S2 / ESP32-S3)
 
-Este es el código para el dispositivo **Maestro** (XIAO ESP32-S3) que consulta los datos del dispositivo Esclavo (ESP32-C3 Medidor de Ruido).
+This example is an I2C master that reads `SensorData` from the ESP32-C3 slave at address `0x08`.
 
-## Conexiones I2C
-Conecta los siguientes pines entre el XIAO ESP32-S3 y el ESP32-C3.  
-**IMPORTANTE:** Como ambos dispositivos funcionan a 3.3V, no necesitas conversores de nivel lógico. Sin embargo, recuerda que el bus I2C idealmente requiere resistencias pull-up de 4.7kΩ en las líneas SDA y SCL (aunque a veces las internas o las de los módulos funcionan para distancias cortas).
+## Default Pin Mapping
 
-| Señal | XIAO ESP32-S3 (Master) | ESP32-C3 (Slave) |
-| :--- | :--- | :--- |
-| **SDA** | D4 (GPIO 5) | GPIO 8 |
-| **SCL** | D5 (GPIO 6) | GPIO 9 |
-| **GND** | GND | GND |
-| **3V3/5V**| Vin/5V (Alimentación compartida si aplica) | 5V/3V3 |
+### XIAO ESP32-S3
+| Signal | Pin |
+| :--- | :--- |
+| SDA | GPIO 5 |
+| SCL | GPIO 6 |
 
-*Nota: Asegúrate de conectar las tierras (GND) de ambos dispositivos.*
+### Lolin S2 Mini
+| Signal | Pin |
+| :--- | :--- |
+| SDA | GPIO 8 |
+| SCL | GPIO 9 |
 
-## Funcionamiento
-1. El Maestro inicia el bus I2C.
-2. Cada 1 segundo, solicita 4 bytes a la dirección `0x42`.
-3. Reconstruye el número decimal (`float`) y lo muestra por el monitor serie.
+Slave side (ESP32-C3):
+- SDA: GPIO 8
+- SCL: GPIO 10
+
+## Wiring Notes
+- Connect GND between both boards.
+- Keep I2C at 3.3V logic.
+- Add pull-ups (for example 4.7k to 3.3V on SDA/SCL) when needed.
+
+## Behavior
+- Initializes I2C with board-specific pins.
+- Polls slave `0x08` every 5 seconds.
+- Sends `GET_STATUS` (`0x20`) and falls back to legacy (`0x00`) if needed.
+- Sends `GET_DATA` (`0x01`) and prints parsed `SensorData` fields.
+
+## Troubleshooting
+- `I2C Connection Error: 2`: no ACK from slave address, usually wiring/power/GND issue.
+- No data but device detected: command mismatch or struct/protocol mismatch between master and slave firmware.

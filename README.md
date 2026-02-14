@@ -1,53 +1,78 @@
-# Medidor de Ruido Ambiental IoT (ESP32-C3 + MAX4466)
+# Environmental Noise Meter (ESP32-C3 Slave + ESP32-S2/S3 Master)
 
-Este repositorio contiene una implementación profesional de un medidor de nivel sonoro (Sonómetro) basado en el microcontrolador **ESP32-C3** (Esclavo) y un sistema de lectura distribuida con **ESP32-S2** (Maestro).
+This repository contains an I2C distributed noise monitoring setup:
+- `src/`: ESP32-C3 firmware acting as I2C slave and acoustic processing node.
+- `examples/`: ESP32-S2/ESP32-S3 firmware acting as I2C master/reader.
 
-## 🚀 Características
+## Features
+- ADC sampling and DSP processing for acoustic indicators.
+- I2C slave protocol compatible with current and legacy masters.
+- Structured payload (`SensorData`) for robust host integration.
+- Basic long-term indicators (`Ld`, `Le`, `Ln`, `Lden`) when device time is available.
 
-*   **Muestreo de Alta Velocidad**: ADC a **10kHz-20kHz** para capturar el espectro de audio completo.
-*   **Procesamiento Digital DSP**: Cálculo de RMS y conversión a dB SPL mediante tareas FreeRTOS dedicadas.
-*   **Arquitectura Maestro-Esclavo**: Comunicación mediante I2C redundante con auto-diagnóstico.
-*   **Diagnóstico en Tiempo Real**: Detección automática de desconexión de micrófono (Bias Check).
+## Hardware Wiring
 
-## 🛠 Hardware y Conexiones
+### 1) Sensor Node (ESP32-C3, I2C slave)
+| Signal | ESP32-C3 Pin |
+| :--- | :--- |
+| MIC OUT (MAX4466) | GPIO 4 |
+| I2C SDA | GPIO 8 |
+| I2C SCL | GPIO 10 |
 
-### 1. Nodo Sensor (I2C Slave - ESP32-C3)
-| Componente | Pin ESP32-C3 | Notas |
+### 2) Master Node
+
+For ESP32-S2 default example mapping:
+| Signal | ESP32-S2 Pin |
+| :--- | :--- |
+| I2C SDA | GPIO 8 |
+| I2C SCL | GPIO 9 |
+
+For XIAO ESP32-S3 default example mapping:
+| Signal | ESP32-S3 Pin |
+| :--- | :--- |
+| I2C SDA | GPIO 5 |
+| I2C SCL | GPIO 6 |
+
+Important:
+- Use common GND between boards.
+- Use 3.3V logic.
+- Add pull-up resistors (typically 4.7k to 3.3V on SDA/SCL) if your boards do not include them.
+
+## I2C Protocol
+- Slave address: `0x08`
+
+Commands (1 byte):
+| Command | Value | Response |
 | :--- | :--- | :--- |
-| **MAX4466 OUT** | GPIO 4 | Entrada ADC |
-| **I2C SDA** | GPIO 8 | Pin D2 en Lolin/SuperMini |
-| **I2C SCL** | GPIO 10 | Pin D1 en Lolin/SuperMini |
+| `GET_STATUS` | `0x20` | 1 byte (`1` mic OK, `0` mic error) |
+| `GET_STATUS` legacy | `0x00` | Same as above (backward compatibility) |
+| `GET_DATA` | `0x01` | Full `SensorData` struct |
+| `GET_DB` legacy | `0x10` | 4-byte float |
+| `GET_RAW_MV` legacy | `0x30` | 4-byte uint32 |
+| `GET_LMAX` legacy | `0x40` | 4-byte float |
+| `GET_L10` legacy | `0x60` | 4-byte float |
+| `GET_L90` legacy | `0x70` | 4-byte float |
 
-### 2. Datalogger/Master (I2C Master - ESP32-S2)
-| Componente | Pin ESP32-S2 | Notas |
-| :--- | :--- | :--- |
-| **I2C SDA** | GPIO 8 | Conectar a SDA de C3 |
-| **I2C SCL** | GPIO 9 | Conectar a SCL de C3 |
+Notes:
+- Command `0x09` is reserved for identify response and also accepted as legacy "set time" when sent with 4 additional bytes.
+- Master example polls every 5 seconds by default.
 
-> **IMPORTANTE**: Al usar ESP32-S2 y C3, recuerda que el bus I2C **necesita resistencias de pull-up** (4.7kΩ a 3.3V) si los cables son largos o si la comunicación es inestable.
+## Build and Flash (PlatformIO)
 
-## 📡 Protocolo I2C (Dirección 0x42)
+Slave (ESP32-C3):
+- Open repository root in VSCode/PlatformIO.
+- Build/upload environment: `lolin_c3_mini`.
 
-El sensor responde a los siguientes comandos (1 byte):
+Master examples:
+- Open `examples/` in VSCode/PlatformIO.
+- Build/upload environment: `seeed_xiao_esp32s3` or `lolin_s2_mini`.
 
-| Comando | Valor | Respuesta |
-| :--- | :--- | :--- |
-| `GET_DB` | `0x10` | **4 Bytes** (Float) - Nivel en dB (LAeq,1s) |
-| `GET_STATUS` | `0x20` | **1 Byte** (Uint8) - 1: OK, 0: Error Mic |
-| `GET_RAW` | `0x30` | **4 Bytes** (Uint32) - Valor RMS en mV |
+## Calibration
+Adjust these constants in `src/main.cpp`:
+- `CALIBRATION_DB`
+- `CALIBRATION_RMS_MV`
 
-## ⚙️ Instalación (PlatformIO)
+Use a reference calibrator or certified meter and document calibration conditions.
 
-Cada carpeta es un proyecto independiente:
-1.  **ruido**: Código para el ESP32-C3 (Esclavo).
-2.  **ruido-max4466-maestro**: Código para el ESP32-S2 (Maestro).
-
-Para flashear, abre la carpeta correspondiente en VSCode con PlatformIO y usa el botón `Upload`.
-
-## 📐 Calibración
-
-Ajusta la constante `CALIBRATION_DB` en el código del esclavo para que coincida con un sonómetro de referencia. El valor por defecto es un punto de partida basado en la sensibilidad estándar del MAX4466.
-
-## 📜 Licencia
-
-MIT License - Ver archivo [LICENSE](LICENSE).
+## License
+MIT. See `LICENSE`.
