@@ -117,7 +117,8 @@ static inline SensorData snapshot_sensor_data() {
   return copy;
 }
 
-// --- NOISE PERIOD STATISTICS (DECRETO 213/2012) ---
+// --- NOISE PERIOD STATISTICS (DECRETO 213/2012, ISO 1996-2) ---
+// Day 07:00-19:00 (12h), Evening 19:00-23:00 (4h), Night 23:00-07:00 (8h)
 struct PeriodStats {
   double energySum;
   uint32_t count;
@@ -132,6 +133,7 @@ struct PeriodStats {
       return 0.0f;
     return (float)(10.0 * log10(energySum / (double)count));
   }
+  bool hasData() const { return count > 0; }
   void reset() {
     energySum = 0;
     count = 0;
@@ -302,9 +304,15 @@ void adc_task(void *pvParameters) {
               statsNight.add(laeq_local);
             }
 
-            ld_local = statsDay.getAvg();
-            le_local = statsEvening.getAvg();
-            ln_local = statsNight.getAvg();
+            // Solo actualizar Ld/Le/Ln cuando el periodo tiene datos (evita 0 dB
+            // por la noche: tras reset a 00:00, día y tarde no tienen muestras
+            // hasta 07:00 y 19:00; se mantiene el último valor conforme a la norma).
+            if (statsDay.hasData())
+              ld_local = statsDay.getAvg();
+            if (statsEvening.hasData())
+              le_local = statsEvening.getAvg();
+            if (statsNight.hasData())
+              ln_local = statsNight.getAvg();
 
             double l_d = (double)ld_local;
             double l_e = (double)le_local;

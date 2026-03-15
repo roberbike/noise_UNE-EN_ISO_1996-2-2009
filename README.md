@@ -68,11 +68,10 @@ Master examples:
 - Build/upload environment: `seeed_xiao_esp32s3` or `lolin_s2_mini`.
 
 ## Calibration
-Adjust these constants in `src/main.cpp`:
-- `CALIBRATION_DB`
-- `CALIBRATION_RMS_MV`
 
-Use a reference calibrator or certified meter and document calibration conditions.
+- **Constants** in `src/main.cpp`: `CALIBRATION_DB` (e.g. 94.0), `CALIBRATION_RMS_MV` (measured with calibrator).
+- **Procedure and MAX4466 setup** (wiring, potentiometer gain, ISO 1996-2 / Decreto 213/2012): **[docs/CALIBRACION.md](docs/CALIBRACION.md)**.
+- **Calibration firmware** (standalone, Serial output of RMS mV and LAeq): run the example in **`examples/calibration/`** (env `lolin_c3_mini`), then use the stable RMS (mV) value as `CALIBRATION_RMS_MV` in the main firmware.
 
 ## License
 MIT. See `LICENSE`.
