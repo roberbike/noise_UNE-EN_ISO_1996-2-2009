@@ -23,11 +23,6 @@ uint8_t cachedMicOk = 0;
 
 volatile uint8_t i2c_active_command = CMD_GET_STATUS;
 
-struct DataMessage {
-    SensorData data;
-    uint8_t mic_ok;
-};
-
 static inline void update_i2c_command(uint8_t cmd) {
     i2c_active_command = cmd;
 }
@@ -68,7 +63,7 @@ void requestEvent() {
     uint8_t cmd = read_i2c_command();
     
     // Drain queue to ensure we have the absolute latest metrics
-    DataMessage msg;
+    I2cPayloadMessage msg;
     while (xQueueReceive(dataQueue, &msg, 0) == pdTRUE) {
         cachedSensorData = msg.data;
         cachedMicOk = msg.mic_ok;

@@ -110,18 +110,15 @@ static void IRAM_ATTR adc_timer_callback(void* arg) {
             .samples_count = (uint32_t)samples_count
         };
         
-        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-        xQueueOverwriteFromISR(timerToTaskQueue, &secData, &xHigherPriorityTaskWoken);
+        // BUG FIX: esp_timer callback runs from an RTOS task natively, NOT from an HW ISR.
+        // Therefore, we must use standard xQueueOverwrite, avoiding illegal ..FromISR() calls.
+        xQueueOverwrite(timerToTaskQueue, &secData);
 
         // Reset accumulators
         sum_sq_A = 0.0;
         max_fast_sq = 0.0f;
         max_slow_sq = 0.0f;
         samples_count = 0;
-        
-        if (xHigherPriorityTaskWoken) {
-            portYIELD_FROM_ISR();
-        }
     }
 }
 
@@ -131,11 +128,7 @@ static void IRAM_ATTR adc_timer_callback(void* arg) {
 void aggregator_task(void *pvParameters) {
     RawSecondData secData;
     SensorData localSensorData = {0};
-
-    struct {
-        SensorData data;
-        uint8_t mic_ok;
-    } i2cMsg;
+    I2cPayloadMessage i2cMsg;
 
     while (1) {
         // Blocks efficiently waiting for 1 second of data
@@ -251,8 +244,8 @@ void ruido_setup() {
     delay(1000);
     SerialLog("INIT", "Smart City Noise Sensor (Class 1 HW Timer Driven)");
 
-    // Define queues
-    dataQueue = xQueueCreate(1, sizeof(SensorData) + sizeof(uint8_t));
+    // Define queues with explicit structural sizes
+    dataQueue = xQueueCreate(1, sizeof(I2cPayloadMessage));
     timerToTaskQueue = xQueueCreate(1, sizeof(RawSecondData));
 
     if (dataQueue == NULL || timerToTaskQueue == NULL) {

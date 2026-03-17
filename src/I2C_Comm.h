@@ -44,6 +44,13 @@
 #define CMD_LEGACY_GET_RAW_MV 0x30
 #define CMD_LEGACY_GET_LMAX 0x40
 
+// --- Secure Queue Payload ---
+// Packed struct to guarantee memory size alignment across FreeRTOS Queues
+struct I2cPayloadMessage {
+    SensorData data;
+    uint8_t mic_ok;
+} __attribute__((packed));
+
 // --- Globals managed by the DSP task ---
 // Used to snapshot values when passing data to the I2C requests
 // Now powered by FreeRTOS Queue to prevent thread locking
