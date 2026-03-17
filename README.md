@@ -74,4 +74,4 @@ Master examples:
 - **Calibration firmware** (standalone, Serial output of RMS mV and LAeq): run the example in **`examples/calibration/`** (env `lolin_c3_mini`), then use the stable RMS (mV) value as `CALIBRATION_RMS_MV` in the main firmware.
 
 ## License
-MIT. See `LICENSE`.
+GPL-3.0. See `LICENSE`.
