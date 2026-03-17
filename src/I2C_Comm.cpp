@@ -15,23 +15,25 @@
 
 #include "I2C_Comm.h"
 #include <sys/time.h>
+#include <freertos/queue.h>
+
+QueueHandle_t dataQueue = NULL;
+SensorData cachedSensorData = {0};
+uint8_t cachedMicOk = 0;
 
 volatile uint8_t i2c_active_command = CMD_GET_STATUS;
 
+struct DataMessage {
+    SensorData data;
+    uint8_t mic_ok;
+};
+
 static inline void update_i2c_command(uint8_t cmd) {
-    if (xSemaphoreTake(dataMutex, portMAX_DELAY)) {
-        i2c_active_command = cmd;
-        xSemaphoreGive(dataMutex);
-    }
+    i2c_active_command = cmd;
 }
 
 static inline uint8_t read_i2c_command() {
-    uint8_t cmd = CMD_GET_STATUS;
-    if (xSemaphoreTake(dataMutex, portMAX_DELAY)) {
-        cmd = i2c_active_command;
-        xSemaphoreGive(dataMutex);
-    }
-    return cmd;
+    return i2c_active_command;
 }
 
 // --- I2C SLAVE EVENT HANDLERS ---
@@ -64,29 +66,26 @@ void receiveEvent(int bytes) {
 
 void requestEvent() {
     uint8_t cmd = read_i2c_command();
-    SensorData localData;
-    float laeq = 0, lafmax = 0, l10 = 0, l90 = 0;
-    uint32_t rms_mv = 0;
-    uint8_t mic_ok = 0;
-
-    // Fast copy from global using Mutex
-    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10))) {
-        memcpy(&localData, (const void *)&globalSensorData, sizeof(SensorData));
-        laeq = g_LAeq_1s;
-        lafmax = g_LAFmax_1s;
-        l10 = g_L10_1s;
-        l90 = g_L90_1s;
-        rms_mv = g_last_rms_mv;
-        mic_ok = g_mic_connected ? 1 : 0;
-        xSemaphoreGive(dataMutex);
+    
+    // Drain queue to ensure we have the absolute latest metrics
+    DataMessage msg;
+    while (xQueueReceive(dataQueue, &msg, 0) == pdTRUE) {
+        cachedSensorData = msg.data;
+        cachedMicOk = msg.mic_ok;
     }
+
+    float laeq = cachedSensorData.noiseAvgDb;
+    float lafmax = cachedSensorData.noisePeakDb;
+    float l10 = cachedSensorData.noiseAvgLegalDb;
+    float l90 = (float)cachedSensorData.lowNoiseLevel;
+    uint32_t rms_mv = cachedSensorData.noise;
 
     switch (cmd) {
         case CMD_GET_STATUS:
-            Wire.write(&mic_ok, 1);
+            Wire.write(&cachedMicOk, 1);
             break;
         case CMD_GET_DATA:
-            Wire.write((uint8_t *)&localData, sizeof(SensorData));
+            Wire.write((uint8_t *)&cachedSensorData, sizeof(SensorData));
             break;
         case CMD_IDENTIFY: {
             uint8_t id[5] = {0x01, 0x02, 0x01, 0x01, I2C_ADDR_SLAVE};

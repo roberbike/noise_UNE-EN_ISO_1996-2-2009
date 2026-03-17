@@ -21,6 +21,7 @@
 #include <Wire.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <freertos/queue.h>
 #include "DSP_Engine.h"
 
 // --- I2C Configuration ---
@@ -45,17 +46,10 @@
 
 // --- Globals managed by the DSP task ---
 // Used to snapshot values when passing data to the I2C requests
-extern volatile float g_LAeq_1s;
-extern volatile float g_LAFmax_1s;
-extern volatile float g_LASmax_1s;
-extern volatile float g_L10_1s;
-extern volatile float g_L90_1s;
-extern volatile uint32_t g_last_rms_mv;
-extern volatile bool g_mic_connected;
-extern SensorData globalSensorData;
-
-// Replaced portMUX with Mutex
-extern SemaphoreHandle_t dataMutex;
+// Now powered by FreeRTOS Queue to prevent thread locking
+extern QueueHandle_t dataQueue;
+extern SensorData cachedSensorData;
+extern uint8_t cachedMicOk;
 
 // Initialization
 void I2C_Comm_Init();

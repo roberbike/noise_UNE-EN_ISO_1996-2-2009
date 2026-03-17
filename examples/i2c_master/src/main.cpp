@@ -66,6 +66,7 @@ void setup() {
   delay(2000);
   Serial.println("--- Master - Sensor Compat Test ---");
   Wire.begin(I2C_SDA, I2C_SCL);
+  Wire.setTimeOut(100); // 100ms hardware timeout to prevent master-side lockups 
   Serial.printf("I2C Initialized (SDA=%d, SCL=%d). Polling Slave 0x%02X...\n",
                 I2C_SDA, I2C_SCL, SLAVE_ADDR);
 }

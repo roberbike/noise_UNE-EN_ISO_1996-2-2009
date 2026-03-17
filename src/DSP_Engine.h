@@ -37,25 +37,25 @@ struct Biquad {
 
 // PeriodStats for Day/Evening/Night accumulations
 struct PeriodStats {
-    double energySum;
+    float energySum;
     uint32_t count;
     
     void add(float db) {
         if (db > 10.0f) { // Ignore silence/noise floor
-            energySum += pow(10.0, (double)db / 10.0);
+            energySum += powf(10.0f, db / 10.0f);
             count++;
         }
     }
     
     float getAvg() {
-        if (count == 0) return 0.0f;
-        return (float)(10.0 * log10(energySum / (double)count));
+        if (count == 0 || energySum <= 0.0f) return 0.0f;
+        return 10.0f * log10f(energySum / (float)count);
     }
     
     bool hasData() const { return count > 0; }
     
     void reset() {
-        energySum = 0;
+        energySum = 0.0f;
         count = 0;
     }
 };
