@@ -58,6 +58,9 @@ extern QueueHandle_t dataQueue;
 extern SensorData cachedSensorData;
 extern uint8_t cachedMicOk;
 
+// Synchronization
+void I2C_Comm_Sync();
+
 // Initialization
 void I2C_Comm_Init();
 

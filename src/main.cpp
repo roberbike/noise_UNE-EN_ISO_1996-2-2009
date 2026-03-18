@@ -18,7 +18,6 @@
 #include <freertos/task.h>
 #include <freertos/queue.h>
 #include "driver/adc.h"
-#include "esp_timer.h"
 #include "esp_adc_cal.h"
 #include "sys/time.h"
 #include "time.h"
@@ -28,7 +27,7 @@
 
 /**
  * --- ESP32-C3 PROFESSIONAL NOISE MONITOR ---
- * RTOS Timer Driven, FreeRTOS Queue Thread-Safe Architecture
+ * RTOS Polling Architecture (Senior Level)
  * Compliant with (orientative) requirements of Decree 213/2012 & UNE-ISO 1996-2.
  */
 
@@ -46,8 +45,7 @@ int stat_idx = 0;
 esp_adc_cal_characteristics_t adc_chars;
 float dc_offset = 2048.0;
 
-// Timer and Task synchronization
-esp_timer_handle_t adc_timer_handle;
+// Task synchronization
 TaskHandle_t aggregator_task_handle = NULL;
 
 // Safe double-buffer for passing aggregated 1-second data to aggregator task
@@ -67,58 +65,68 @@ bool check_microphone_connection(uint32_t bias_mv) {
 }
 
 /**
- * HW Timer Callback (Runs at strict 16kHz / 62us)
- * Avoids 100% CPU lock from micros() while polling ADC perfectly.
+ * High Priority Sampling Task (Polling)
+ * Senior Programmer Note: On Single-Core C3, polling at 16kHz is MORE efficient 
+ * than esp_timer because it eliminates 16,000 task context switches per second.
  */
-static void IRAM_ATTR adc_timer_callback(void* arg) {
-    static int samples_count = 0;
-    static double sum_sq_A = 0.0;
-    static float fast_ema_sq = 0.0f;
-    static float slow_ema_sq = 0.0f;
-    static float max_fast_sq = 0.0f;
-    static float max_slow_sq = 0.0f;
+void sampling_task(void *pvParameters) {
+    int samples_count = 0;
+    double sum_sq_A = 0.0;
+    float fast_ema_sq = 0.0f;
+    float slow_ema_sq = 0.0f;
+    float max_fast_sq = 0.0f;
+    float max_slow_sq = 0.0f;
 
     const float alpha_fast = 0.000500f; // Fast = 125ms
     const float alpha_slow = 0.000062f; // Slow = 1s
 
-    uint32_t raw = adc1_get_raw(ADC_CHANNEL);
+    uint32_t next_sample_time = micros();
 
-    dc_offset = (dc_offset * 0.9999f) + ((float)raw * 0.0001f);
-    float signal = (float)raw - dc_offset;
+    while (1) {
+        uint32_t now = micros();
+        if (now >= next_sample_time) {
+            uint32_t raw = adc1_get_raw(ADC_CHANNEL);
 
-    float filtered = signal;
-    for (int i = 0; i < 3; i++) {
-        filtered = DSP_ApplyFilter(filtered, aWeightingFilters[i]);
-    }
+            dc_offset = (dc_offset * 0.9999f) + ((float)raw * 0.0001f);
+            float signal = (float)raw - dc_offset;
 
-    float sq = filtered * filtered;
-    sum_sq_A += (double)sq;
+            float filtered = signal;
+            for (int i = 0; i < 3; i++) {
+                filtered = DSP_ApplyFilter(filtered, aWeightingFilters[i]);
+            }
 
-    fast_ema_sq = (sq * alpha_fast) + (fast_ema_sq * (1.0f - alpha_fast));
-    slow_ema_sq = (sq * alpha_slow) + (slow_ema_sq * (1.0f - alpha_slow));
+            float sq = filtered * filtered;
+            sum_sq_A += (double)sq;
 
-    if (fast_ema_sq > max_fast_sq) max_fast_sq = fast_ema_sq;
-    if (slow_ema_sq > max_slow_sq) max_slow_sq = slow_ema_sq;
+            fast_ema_sq = (sq * alpha_fast) + (fast_ema_sq * (1.0f - alpha_fast));
+            slow_ema_sq = (sq * alpha_slow) + (slow_ema_sq * (1.0f - alpha_slow));
 
-    samples_count++;
+            if (fast_ema_sq > max_fast_sq) max_fast_sq = fast_ema_sq;
+            if (slow_ema_sq > max_slow_sq) max_slow_sq = slow_ema_sq;
 
-    // Once per second, offload the heavy summary to the main RTOS task
-    if (samples_count >= SAMPLE_RATE) {
-        RawSecondData secData = {
-            .max_fast_sq = max_fast_sq,
-            .sum_sq_A = sum_sq_A,
-            .samples_count = (uint32_t)samples_count
-        };
-        
-        // BUG FIX: esp_timer callback runs from an RTOS task natively, NOT from an HW ISR.
-        // Therefore, we must use standard xQueueOverwrite, avoiding illegal ..FromISR() calls.
-        xQueueOverwrite(timerToTaskQueue, &secData);
+            samples_count++;
 
-        // Reset accumulators
-        sum_sq_A = 0.0;
-        max_fast_sq = 0.0f;
-        max_slow_sq = 0.0f;
-        samples_count = 0;
+            if (samples_count >= SAMPLE_RATE) {
+                RawSecondData secData = {
+                    .max_fast_sq = max_fast_sq,
+                    .sum_sq_A = sum_sq_A,
+                    .samples_count = (uint32_t)samples_count
+                };
+                xQueueOverwrite(timerToTaskQueue, &secData);
+
+                sum_sq_A = 0.0;
+                max_fast_sq = 0.0f;
+                max_slow_sq = 0.0f;
+                samples_count = 0;
+            }
+
+            next_sample_time += SAMPLE_PERIOD_US;
+        }
+
+        // Allow I2C and System tasks to run during the "dead time" within the 62us window
+        if (samples_count % 16 == 0) {
+            vTaskDelay(0); // Yield every 1ms
+        }
     }
 }
 
@@ -131,7 +139,6 @@ void aggregator_task(void *pvParameters) {
     I2cPayloadMessage i2cMsg;
 
     while (1) {
-        // Blocks efficiently waiting for 1 second of data
         if (xQueueReceive(timerToTaskQueue, &secData, portMAX_DELAY) == pdTRUE) {
             
             float mean_sq_A = (float)(secData.sum_sq_A / secData.samples_count);
@@ -231,10 +238,10 @@ void aggregator_task(void *pvParameters) {
                 SerialLog("WARN", "Microphone range error/disconnected");
             }
 
-            // POST TO QUEUE (Overwrites previous unread item. Non-blocking thread-safe mechanism)
             i2cMsg.data = localSensorData;
             i2cMsg.mic_ok = mic_ok_local ? 1 : 0;
             xQueueOverwrite(dataQueue, &i2cMsg);
+            I2C_Comm_Sync();
         }
     }
 }
@@ -242,9 +249,8 @@ void aggregator_task(void *pvParameters) {
 void ruido_setup() {
     Serial.begin(115200);
     delay(1000);
-    SerialLog("INIT", "Smart City Noise Sensor (Class 1 HW Timer Driven)");
+    SerialLog("INIT", "Smart City Noise Sensor (Class 1 Architecture)");
 
-    // Define queues with explicit structural sizes
     dataQueue = xQueueCreate(1, sizeof(I2cPayloadMessage));
     timerToTaskQueue = xQueueCreate(1, sizeof(RawSecondData));
 
@@ -267,19 +273,13 @@ void ruido_setup() {
 #endif
 
     // Launch Aggregator Task
-    xTaskCreate(aggregator_task, "DSP_AGG", 8192, NULL, configMAX_PRIORITIES - 2, &aggregator_task_handle); 
+    xTaskCreate(aggregator_task, "DSP_AGG", 8192, NULL, configMAX_PRIORITIES - 5, &aggregator_task_handle); 
 
-    // Configure and start highest priority hardware timer for sampling
-    const esp_timer_create_args_t adc_timer_args = {
-        .callback = &adc_timer_callback,
-        .arg = NULL,
-        .dispatch_method = ESP_TIMER_TASK,
-        .name = "adc_sample_timer",
-        .skip_unhandled_events = true
-    };
-    
-    esp_timer_create(&adc_timer_args, &adc_timer_handle);
-    esp_timer_start_periodic(adc_timer_handle, SAMPLE_PERIOD_US);
+    // Launch Sampling Task
+    // Note: Priority MUST be lower than the I2C interrupt handler priority.
+    // On ESP32-C3, I2C slave callbacks are ISR-based, but high RTOS task priority
+    // can still delay their proper execution via interrupt latency.
+    xTaskCreate(sampling_task, "ADC_SAM", 8192, NULL, 5, NULL);
 }
 
 void setup() { 

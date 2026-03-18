@@ -59,15 +59,18 @@ void receiveEvent(int bytes) {
     }
 }
 
-void requestEvent() {
-    uint8_t cmd = read_i2c_command();
-    
+void I2C_Comm_Sync() {
     // Drain queue to ensure we have the absolute latest metrics
+    // This is called from a task context, not from the I2C callback
     I2cPayloadMessage msg;
     while (xQueueReceive(dataQueue, &msg, 0) == pdTRUE) {
         cachedSensorData = msg.data;
         cachedMicOk = msg.mic_ok;
     }
+}
+
+void requestEvent() {
+    uint8_t cmd = read_i2c_command();
 
     float laeq = cachedSensorData.noiseAvgDb;
     float lafmax = cachedSensorData.noisePeakDb;
@@ -110,10 +113,16 @@ void requestEvent() {
 
 void I2C_Comm_Init() {
     bool pins_ok = Wire.setPins(I2C_SDA, I2C_SCL);
-    bool i2c_ok = pins_ok && Wire.begin((uint8_t)I2C_ADDR_SLAVE);
-    Wire.setClock(100000);
+    
+    // Senior Programmer Note: Register callbacks BEFORE begin() to ensure 
+    // the hardware is ready to handle the very first transaction.
     Wire.onReceive(receiveEvent);
     Wire.onRequest(requestEvent);
+
+    bool i2c_ok = pins_ok && Wire.begin((uint8_t)I2C_ADDR_SLAVE);
+    
+    // Slave should NOT set the bus clock; it's controlled by the Master.
+    // Wire.setClock(100000); 
 
     if (pins_ok && i2c_ok) {
         Serial.printf("[INIT] I2C Slave OK addr=0x%02X SDA=%d SCL=%d\n", I2C_ADDR_SLAVE, I2C_SDA, I2C_SCL);
