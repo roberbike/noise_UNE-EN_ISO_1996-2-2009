@@ -121,11 +121,10 @@ void sampling_task(void *pvParameters) {
             }
 
             next_sample_time += SAMPLE_PERIOD_US;
-        }
-
-        // Allow I2C and System tasks to run during the "dead time" within the 62us window
-        if (samples_count % 16 == 0) {
-            vTaskDelay(0); // Yield every 1ms
+        } else {
+            // Dead time between samples (~62us window).
+            // Release the CPU so I2C slave callbacks can be serviced.
+            taskYIELD();
         }
     }
 }
