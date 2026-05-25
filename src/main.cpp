@@ -149,6 +149,10 @@ void aggregator_task(void *pvParameters) {
             float l10_local = 0.0f;
             float l90_local = 0.0f;
             float lden_local = localSensorData.noiseLden;
+            // Preserve last known period values as default (ISO 1996-2: keep last valid)
+            float ld_local = localSensorData.Ld;
+            float le_local = localSensorData.Le;
+            float ln_local = localSensorData.Ln;
 
             bool valid_sample = (voltage_rms_A > 0 && CALIBRATION_RMS_MV > 0.0f);
             if (valid_sample) {
@@ -187,9 +191,9 @@ void aggregator_task(void *pvParameters) {
                         statsNight.add(laeq_local);
                     }
 
-                    float ld_local = statsDay.hasData() ? statsDay.getAvg() : localSensorData.Ld;
-                    float le_local = statsEvening.hasData() ? statsEvening.getAvg() : localSensorData.Le;
-                    float ln_local = statsNight.hasData() ? statsNight.getAvg() : localSensorData.Ln;
+                    ld_local = statsDay.hasData() ? statsDay.getAvg() : localSensorData.Ld;
+                    le_local = statsEvening.hasData() ? statsEvening.getAvg() : localSensorData.Le;
+                    ln_local = statsNight.hasData() ? statsNight.getAvg() : localSensorData.Ln;
 
                     if (ld_local > 0 || le_local > 0 || ln_local > 0) {
                         float lden_energy = (12.0f * powf(10.0f, ld_local / 10.0f) +
@@ -224,9 +228,9 @@ void aggregator_task(void *pvParameters) {
             localSensorData.noiseAvgLegalMax = valid_sample ? (float)voltage_fast_max : 0.0f;
             localSensorData.noiseAvgLegalMaxDb = lafmax_local;
             localSensorData.lowNoiseLevel = (l90_local > 0.0f) ? (uint16_t)l90_local : 0;
-            localSensorData.Ld = statsDay.getAvg();
-            localSensorData.Le = statsEvening.getAvg();
-            localSensorData.Ln = statsNight.getAvg();
+            localSensorData.Ld = ld_local;
+            localSensorData.Le = le_local;
+            localSensorData.Ln = ln_local;
             localSensorData.noiseLden = lden_local;
             localSensorData.cycles++;
 
