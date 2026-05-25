@@ -178,6 +178,7 @@ void aggregator_task(void *pvParameters) {
                     }
                     l10_local = temp_buf[stat_idx / 10];
                     l90_local = temp_buf[stat_idx * 9 / 10];
+                    stat_idx = 0; // rolling 20s window: refill on next cycle
                 }
 
                 struct tm timeinfo;
