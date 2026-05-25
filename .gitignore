@@ -10,3 +10,4 @@ internal/
 dist/
 build/
 output/
+QA_REPORT.md

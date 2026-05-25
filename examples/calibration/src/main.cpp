@@ -110,23 +110,29 @@ void loop() {
   unsigned long next_sample = micros();
   const unsigned long deadline = next_sample + 1000000UL;  // 1 s
 
-  while (micros() < deadline) {
-    if (micros() >= next_sample) {
-      next_sample += SAMPLE_PERIOD_US;
+    while (micros() < deadline) {
+      if (micros() >= next_sample) {
+        next_sample += SAMPLE_PERIOD_US;
 
-      uint32_t raw = adc1_get_raw(ADC_CHANNEL);
-      dc_offset = (dc_offset * 0.9999f) + ((float)raw * 0.0001f);
-      float signal = (float)raw - dc_offset;
+        uint32_t raw = adc1_get_raw(ADC_CHANNEL);
+        dc_offset = (dc_offset * 0.9999f) + ((float)raw * 0.0001f);
+        float signal = (float)raw - dc_offset;
 
-      float filtered = signal;
-      for (int i = 0; i < 3; i++) {
-        filtered = applyFilter(filtered, aWeightingFilters[i]);
+        float filtered = signal;
+        for (int i = 0; i < 3; i++) {
+          filtered = applyFilter(filtered, aWeightingFilters[i]);
+        }
+        sum_sq_A += (double)(filtered * filtered);
+        samples_count++;
+      } else {
+          unsigned long now = micros();
+          if (next_sample - now > 2000) {
+              vTaskDelay(pdMS_TO_TICKS(1));
+          } else {
+              taskYIELD();
+          }
       }
-      sum_sq_A += (double)(filtered * filtered);
-      samples_count++;
     }
-    yield();
-  }
 
   if (samples_count > 0) {
     float mean_sq = (float)(sum_sq_A / (double)samples_count);
