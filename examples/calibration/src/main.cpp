@@ -136,17 +136,24 @@ void loop() {
 
   if (samples_count > 0) {
     float mean_sq = (float)(sum_sq_A / (double)samples_count);
-    uint32_t voltage_rms_mv =
-        esp_adc_cal_raw_to_voltage((uint32_t)sqrtf(mean_sq), &adc_chars);
+    // Slope-only float conversion (same as the fixed main firmware): no
+    // integer truncation and no calibration intercept on an AC amplitude.
+    static float mv_per_count = 0.0f;
+    if (mv_per_count == 0.0f) {
+      mv_per_count = (float)(esp_adc_cal_raw_to_voltage(3000, &adc_chars) -
+                             esp_adc_cal_raw_to_voltage(1000, &adc_chars)) / 2000.0f;
+      Serial.printf("[INIT] ADC slope: %.4f mV/count\n", mv_per_count);
+    }
+    float voltage_rms_mv = sqrtf(mean_sq) * mv_per_count;
 
     float laeq = 0.0f;
-    if (voltage_rms_mv > 0 && CALIBRATION_RMS_MV > 0.0f) {
-      laeq = 20.0f * log10((float)voltage_rms_mv / CALIBRATION_RMS_MV) +
+    if (voltage_rms_mv > 0.05f && CALIBRATION_RMS_MV > 0.0f) {
+      laeq = 20.0f * log10(voltage_rms_mv / CALIBRATION_RMS_MV) +
              CALIBRATION_DB;
     }
 
-    Serial.printf("RMS: %lu mV  |  LAeq: %.1f dB(A)  (ref %.1f dB @ %.1f mV)\n",
-                  (unsigned long)voltage_rms_mv, laeq, CALIBRATION_DB,
+    Serial.printf("RMS: %.2f mV  |  LAeq: %.1f dB(A)  (ref %.1f dB @ %.1f mV)\n",
+                  voltage_rms_mv, laeq, CALIBRATION_DB,
                   CALIBRATION_RMS_MV);
   }
 }

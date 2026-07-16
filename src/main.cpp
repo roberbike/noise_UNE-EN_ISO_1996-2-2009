@@ -45,6 +45,12 @@ int stat_idx = 0;
 esp_adc_cal_characteristics_t adc_chars;
 float dc_offset = 2048.0;
 
+// mV per ADC count (calibrated slope, no intercept). An AC amplitude such as
+// an RMS must NOT go through esp_adc_cal_raw_to_voltage(): that function maps
+// absolute codes to absolute mV and adds the calibration intercept, which
+// distorts the dB law at low levels. Computed once in ruido_setup().
+float adc_mv_per_count = 1.0f;
+
 // Task synchronization
 TaskHandle_t aggregator_task_handle = NULL;
 
@@ -141,34 +147,45 @@ void aggregator_task(void *pvParameters) {
         if (xQueueReceive(timerToTaskQueue, &secData, portMAX_DELAY) == pdTRUE) {
             
             float mean_sq_A = (float)(secData.sum_sq_A / secData.samples_count);
-            uint32_t voltage_rms_A = esp_adc_cal_raw_to_voltage((uint32_t)sqrtf(mean_sq_A), &adc_chars);
-            uint32_t voltage_fast_max = esp_adc_cal_raw_to_voltage((uint32_t)sqrtf(secData.max_fast_sq), &adc_chars);
+            // Full float chain: no integer truncation. Near the noise floor the
+            // A-weighted RMS is only a few mV; truncating to integer counts and
+            // integer mV quantized LAeq into ~2.5 dB steps (flat lines at the
+            // floor, e.g. a constant 58.7 dB).
+            float voltage_rms_A = sqrtf(mean_sq_A) * adc_mv_per_count;
+            float voltage_fast_max = sqrtf(secData.max_fast_sq) * adc_mv_per_count;
 
-            float laeq_local = 0.0f;
-            float lafmax_local = 0.0f;
-            float l10_local = 0.0f;
-            float l90_local = 0.0f;
+            // Defaults: hold last valid values (never publish 0 dB on an
+            // invalid second; a zero sample poisons Grafana/averages).
+            float laeq_local = localSensorData.noiseAvgDb;
+            float lafmax_local = localSensorData.noisePeakDb;
+            float l10_local = localSensorData.noiseAvgLegalDb;
+            float l90_local = (float)localSensorData.lowNoiseLevel;
             float lden_local = localSensorData.noiseLden;
             // Preserve last known period values as default (ISO 1996-2: keep last valid)
             float ld_local = localSensorData.Ld;
             float le_local = localSensorData.Le;
             float ln_local = localSensorData.Ln;
 
-            bool valid_sample = (voltage_rms_A > 0 && CALIBRATION_RMS_MV > 0.0f);
+            // 0.05 mV floor avoids log10(0) and flags dead-input seconds
+            // (mic supply glitch, stuck ADC) as invalid.
+            bool valid_sample = (voltage_rms_A > 0.05f && CALIBRATION_RMS_MV > 0.0f);
             if (valid_sample) {
-                laeq_local = 20.0f * log10f((float)voltage_rms_A / CALIBRATION_RMS_MV) + CALIBRATION_DB;
-                lafmax_local = 20.0f * log10f((float)voltage_fast_max / CALIBRATION_RMS_MV) + CALIBRATION_DB;
+                laeq_local = 20.0f * log10f(voltage_rms_A / CALIBRATION_RMS_MV) + CALIBRATION_DB;
+                lafmax_local = 20.0f * log10f(voltage_fast_max / CALIBRATION_RMS_MV) + CALIBRATION_DB;
 
                 if (stat_idx < STAT_SAMPLES) {
                     stat_buffer[stat_idx++] = laeq_local;
                 }
 
-                if (stat_idx > 0) {
+                // Percentiles over a FULL 20 s window. Resetting stat_idx every
+                // second (previous behavior) meant the buffer never held more
+                // than 1 sample, so L10/L90 were just the last LAeq.
+                if (stat_idx >= STAT_SAMPLES) {
                     float temp_buf[STAT_SAMPLES];
-                    memcpy(temp_buf, stat_buffer, stat_idx * sizeof(float));
-                    
-                    for (int k = 0; k < stat_idx - 1; k++) {
-                        for (int j = k + 1; j < stat_idx; j++) {
+                    memcpy(temp_buf, stat_buffer, STAT_SAMPLES * sizeof(float));
+
+                    for (int k = 0; k < STAT_SAMPLES - 1; k++) {
+                        for (int j = k + 1; j < STAT_SAMPLES; j++) {
                             if (temp_buf[k] < temp_buf[j]) {
                                 float t = temp_buf[k];
                                 temp_buf[k] = temp_buf[j];
@@ -176,9 +193,9 @@ void aggregator_task(void *pvParameters) {
                             }
                         }
                     }
-                    l10_local = temp_buf[stat_idx / 10];
-                    l90_local = temp_buf[stat_idx * 9 / 10];
-                    stat_idx = 0; // rolling 20s window: refill on next cycle
+                    l10_local = temp_buf[STAT_SAMPLES / 10];
+                    l90_local = temp_buf[STAT_SAMPLES * 9 / 10];
+                    stat_idx = 0; // start next 20 s block
                 }
 
                 struct tm timeinfo;
@@ -214,29 +231,33 @@ void aggregator_task(void *pvParameters) {
             }
 
             uint32_t bias_mv = esp_adc_cal_raw_to_voltage((uint32_t)dc_offset, &adc_chars);
-            bool mic_ok_local = check_microphone_connection(bias_mv);
+            bool mic_ok_local = check_microphone_connection(bias_mv) && valid_sample;
 
-            // Build output struct
-            localSensorData.noise = valid_sample ? voltage_rms_A : 0;
-            localSensorData.noiseAvg = valid_sample ? (float)voltage_rms_A : 0.0f;
-            localSensorData.noiseAvgDb = laeq_local;
-            localSensorData.noisePeak = valid_sample ? (float)voltage_fast_max : 0.0f;
-            localSensorData.noisePeakDb = lafmax_local;
-            localSensorData.noiseMin = valid_sample ? (float)voltage_rms_A : 0.0f;
-            localSensorData.noiseMinDb = laeq_local;
-            localSensorData.noiseAvgLegal = l10_local;
-            localSensorData.noiseAvgLegalDb = l10_local;
-            localSensorData.noiseAvgLegalMax = valid_sample ? (float)voltage_fast_max : 0.0f;
-            localSensorData.noiseAvgLegalMaxDb = lafmax_local;
-            localSensorData.lowNoiseLevel = (l90_local > 0.0f) ? (uint16_t)l90_local : 0;
-            localSensorData.Ld = ld_local;
-            localSensorData.Le = le_local;
-            localSensorData.Ln = ln_local;
-            localSensorData.noiseLden = lden_local;
+            // Build output struct. On an invalid second every field keeps its
+            // last valid value; only cycles advances and mic_ok reports the
+            // fault. Masters must gate publishing on the status byte.
+            if (valid_sample) {
+                localSensorData.noise = (uint32_t)lroundf(voltage_rms_A);
+                localSensorData.noiseAvg = voltage_rms_A;
+                localSensorData.noiseAvgDb = laeq_local;
+                localSensorData.noisePeak = voltage_fast_max;
+                localSensorData.noisePeakDb = lafmax_local;
+                localSensorData.noiseMin = voltage_rms_A;
+                localSensorData.noiseMinDb = laeq_local;
+                localSensorData.noiseAvgLegal = l10_local;
+                localSensorData.noiseAvgLegalDb = l10_local;
+                localSensorData.noiseAvgLegalMax = voltage_fast_max;
+                localSensorData.noiseAvgLegalMaxDb = lafmax_local;
+                localSensorData.lowNoiseLevel = (l90_local > 0.0f) ? (uint16_t)l90_local : 0;
+                localSensorData.Ld = ld_local;
+                localSensorData.Le = le_local;
+                localSensorData.Ln = ln_local;
+                localSensorData.noiseLden = lden_local;
+            }
             localSensorData.cycles++;
 
             if (mic_ok_local) {
-                Serial.printf("[SMART] LAeq:%.1f | LAFmx:%.1f | L10:%.1f | L90:%.1f | RMS:%dmV | Lden:%.1f\n",
+                Serial.printf("[SMART] LAeq:%.1f | LAFmx:%.1f | L10:%.1f | L90:%.1f | RMS:%.2fmV | Lden:%.1f\n",
                               laeq_local, lafmax_local, l10_local, l90_local, voltage_rms_A, lden_local);
             } else {
                 SerialLog("WARN", "Microphone range error/disconnected");
@@ -275,6 +296,12 @@ void ruido_setup() {
     esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN_DB_12, ADC_WIDTH_BIT_12, REF_VOLTAGE, &adc_chars);
     dc_offset = 2048.0f;
 #endif
+
+    // Calibrated slope in mV/count (differential, intercept removed):
+    // valid for converting AC amplitudes such as the A-weighted RMS.
+    adc_mv_per_count = (float)(esp_adc_cal_raw_to_voltage(3000, &adc_chars) -
+                               esp_adc_cal_raw_to_voltage(1000, &adc_chars)) / 2000.0f;
+    Serial.printf("[INIT] ADC slope: %.4f mV/count\n", adc_mv_per_count);
 
     // Launch Aggregator Task
     xTaskCreate(aggregator_task, "DSP_AGG", 8192, NULL, configMAX_PRIORITIES - 5, &aggregator_task_handle); 
