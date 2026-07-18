@@ -107,11 +107,11 @@ void loop() {
   float dc_offset = 2048.0f;
 #endif
 
-  unsigned long next_sample = micros();
-  const unsigned long deadline = next_sample + 1000000UL;  // 1 s
+  uint32_t next_sample = micros();
+  const uint32_t start = next_sample;
 
-    while (micros() < deadline) {
-      if (micros() >= next_sample) {
+    while ((int32_t)(micros() - start) < 1000000L) {  // 1 s, wrap-safe
+      if ((int32_t)(micros() - next_sample) >= 0) {
         next_sample += SAMPLE_PERIOD_US;
 
         uint32_t raw = adc1_get_raw(ADC_CHANNEL);
@@ -125,8 +125,8 @@ void loop() {
         sum_sq_A += (double)(filtered * filtered);
         samples_count++;
       } else {
-          unsigned long now = micros();
-          if (next_sample - now > 2000) {
+          int32_t remaining = (int32_t)(next_sample - micros());
+          if (remaining > 2000) {
               vTaskDelay(pdMS_TO_TICKS(1));
           } else {
               taskYIELD();

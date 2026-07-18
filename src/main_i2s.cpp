@@ -172,7 +172,7 @@ void aggregator_task(void *pvParameters) {
     I2cPayloadMessage i2cMsg;
 
     while (1) {
-        if (xQueueReceive(timerToTaskQueue, &secData, portMAX_DELAY) == pdTRUE) {
+        if (xQueueReceive(timerToTaskQueue, &secData, pdMS_TO_TICKS(2000)) == pdTRUE) {
 
             float mean_sq_A = (float)(secData.sum_sq_A / secData.samples_count);
             float rms_fs = sqrtf(mean_sq_A);
@@ -291,6 +291,15 @@ void aggregator_task(void *pvParameters) {
 
             i2cMsg.data = localSensorData;
             i2cMsg.mic_ok = mic_ok_local ? 1 : 0;
+            xQueueOverwrite(dataQueue, &i2cMsg);
+            I2C_Comm_Sync();
+        } else {
+            // No second completed in 2 s: I2S sampling stalled (driver or DMA
+            // fault). Surface it (status 0, frozen cycles) instead of serving
+            // a frozen struct. Masters gate on the status byte.
+            SerialLog("WARN", "No samples for 2 s: I2S sampling stalled");
+            i2cMsg.data = localSensorData;
+            i2cMsg.mic_ok = 0;
             xQueueOverwrite(dataQueue, &i2cMsg);
             I2C_Comm_Sync();
         }

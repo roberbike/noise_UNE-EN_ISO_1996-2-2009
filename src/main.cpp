@@ -90,7 +90,18 @@ void sampling_task(void *pvParameters) {
 
     while (1) {
         uint32_t now = micros();
-        if (now >= next_sample_time) {
+        // Wrap-safe elapsed check: a direct `now >= next_sample_time` breaks
+        // at the micros() rollover (every ~71.6 min). If a blocking event
+        // straddled the rollover, sampling froze for up to ~71 min and the
+        // cached struct was served unchanged (flat line in dashboards).
+        int32_t behind = (int32_t)(now - next_sample_time);
+        if (behind >= 0) {
+            // If pathologically late (>100 ms blocked), resync instead of
+            // burst-sampling to catch up with a compressed, invalid second.
+            if (behind > 100000) {
+                next_sample_time = now;
+            }
+
             uint32_t raw = adc1_get_raw(ADC_CHANNEL);
 
             dc_offset = (dc_offset * 0.9999f) + ((float)raw * 0.0001f);
@@ -144,7 +155,7 @@ void aggregator_task(void *pvParameters) {
     I2cPayloadMessage i2cMsg;
 
     while (1) {
-        if (xQueueReceive(timerToTaskQueue, &secData, portMAX_DELAY) == pdTRUE) {
+        if (xQueueReceive(timerToTaskQueue, &secData, pdMS_TO_TICKS(2000)) == pdTRUE) {
             
             float mean_sq_A = (float)(secData.sum_sq_A / secData.samples_count);
             // Full float chain: no integer truncation. Near the noise floor the
@@ -265,6 +276,16 @@ void aggregator_task(void *pvParameters) {
 
             i2cMsg.data = localSensorData;
             i2cMsg.mic_ok = mic_ok_local ? 1 : 0;
+            xQueueOverwrite(dataQueue, &i2cMsg);
+            I2C_Comm_Sync();
+        } else {
+            // No second completed in 2 s: the sampling task is stalled.
+            // Surface the fault (status 0, frozen cycles) instead of silently
+            // serving a frozen struct forever, which draws a flat line at an
+            // arbitrary level in dashboards. Masters gate on the status byte.
+            SerialLog("WARN", "No samples for 2 s: sampling task stalled");
+            i2cMsg.data = localSensorData;
+            i2cMsg.mic_ok = 0;
             xQueueOverwrite(dataQueue, &i2cMsg);
             I2C_Comm_Sync();
         }

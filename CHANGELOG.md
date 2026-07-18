@@ -4,6 +4,26 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [3.1.2] - 2026-07-18
+
+### Fixed
+
+- **Multi-minute flat readings at arbitrary levels**: the sampling pacing used
+  a direct unsigned comparison (`now >= next_sample_time`) which is not safe
+  across the `micros()` rollover (every ~71.6 min). A blocking event straddling
+  the rollover froze sampling for up to ~71 min; the aggregator then starved
+  and the I2C cache served the same struct unchanged, drawing a flat line at
+  whatever the last level was. Elapsed-time checks are now wrap-safe
+  (`(int32_t)(now - next) >= 0`), with a resync when the task is more than
+  100 ms late instead of burst-sampling a compressed second.
+- **Stall detection**: the aggregator now times out after 2 s without a
+  completed second, logs a warning and drops the status byte to 0 (cycles
+  freeze too), so a stalled node is visible to masters instead of silently
+  serving frozen data. Applied to both the C3/MAX4466 and S3/ICS-43434 nodes.
+- `examples/calibration/` time checks made wrap-safe as well.
+
+---
+
 ## [3.1.1] - 2026-07-16
 
 ### Fixed
