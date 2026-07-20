@@ -107,11 +107,11 @@ void loop() {
   float dc_offset = 2048.0f;
 #endif
 
-  unsigned long next_sample = micros();
-  const unsigned long deadline = next_sample + 1000000UL;  // 1 s
+  uint32_t next_sample = micros();
+  const uint32_t start = next_sample;
 
-    while (micros() < deadline) {
-      if (micros() >= next_sample) {
+    while ((int32_t)(micros() - start) < 1000000L) {  // 1 s, wrap-safe
+      if ((int32_t)(micros() - next_sample) >= 0) {
         next_sample += SAMPLE_PERIOD_US;
 
         uint32_t raw = adc1_get_raw(ADC_CHANNEL);
@@ -125,8 +125,8 @@ void loop() {
         sum_sq_A += (double)(filtered * filtered);
         samples_count++;
       } else {
-          unsigned long now = micros();
-          if (next_sample - now > 2000) {
+          int32_t remaining = (int32_t)(next_sample - micros());
+          if (remaining > 2000) {
               vTaskDelay(pdMS_TO_TICKS(1));
           } else {
               taskYIELD();
@@ -136,17 +136,24 @@ void loop() {
 
   if (samples_count > 0) {
     float mean_sq = (float)(sum_sq_A / (double)samples_count);
-    uint32_t voltage_rms_mv =
-        esp_adc_cal_raw_to_voltage((uint32_t)sqrtf(mean_sq), &adc_chars);
+    // Slope-only float conversion (same as the fixed main firmware): no
+    // integer truncation and no calibration intercept on an AC amplitude.
+    static float mv_per_count = 0.0f;
+    if (mv_per_count == 0.0f) {
+      mv_per_count = (float)(esp_adc_cal_raw_to_voltage(3000, &adc_chars) -
+                             esp_adc_cal_raw_to_voltage(1000, &adc_chars)) / 2000.0f;
+      Serial.printf("[INIT] ADC slope: %.4f mV/count\n", mv_per_count);
+    }
+    float voltage_rms_mv = sqrtf(mean_sq) * mv_per_count;
 
     float laeq = 0.0f;
-    if (voltage_rms_mv > 0 && CALIBRATION_RMS_MV > 0.0f) {
-      laeq = 20.0f * log10((float)voltage_rms_mv / CALIBRATION_RMS_MV) +
+    if (voltage_rms_mv > 0.05f && CALIBRATION_RMS_MV > 0.0f) {
+      laeq = 20.0f * log10(voltage_rms_mv / CALIBRATION_RMS_MV) +
              CALIBRATION_DB;
     }
 
-    Serial.printf("RMS: %lu mV  |  LAeq: %.1f dB(A)  (ref %.1f dB @ %.1f mV)\n",
-                  (unsigned long)voltage_rms_mv, laeq, CALIBRATION_DB,
+    Serial.printf("RMS: %.2f mV  |  LAeq: %.1f dB(A)  (ref %.1f dB @ %.1f mV)\n",
+                  voltage_rms_mv, laeq, CALIBRATION_DB,
                   CALIBRATION_RMS_MV);
   }
 }

@@ -26,8 +26,17 @@
 
 // --- I2C Configuration ---
 #define I2C_ADDR_SLAVE 0x08 
-#define I2C_SDA 8
+
+// Default slave pins per target (overridable via build_flags)
+#ifndef I2C_SDA
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+#define I2C_SDA 5   // XIAO ESP32-S3: D4
+#define I2C_SCL 6   // XIAO ESP32-S3: D5
+#else
+#define I2C_SDA 8   // ESP32-C3 (lolin_c3_mini)
 #define I2C_SCL 10
+#endif
+#endif
 
 // Protocol Commands
 #define CMD_GET_STATUS 0x20

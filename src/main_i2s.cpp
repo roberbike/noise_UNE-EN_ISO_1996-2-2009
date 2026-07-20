@@ -17,21 +17,38 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
-#include "driver/adc.h"
-#include "esp_adc_cal.h"
 #include "sys/time.h"
 #include "time.h"
 
 #include "DSP_Engine.h"
 #include "I2C_Comm.h"
+#include "MIC_I2S.h"
 
 /**
- * --- ESP32-C3 PROFESSIONAL NOISE MONITOR ---
- * RTOS Polling Architecture (Senior Level)
+ * --- XIAO ESP32-S3 + ICS-43434 PROFESSIONAL NOISE MONITOR ---
+ * I2S digital MEMS microphone node. Same RTOS architecture, DSP chain
+ * (16 kHz A-weighting), ISO 1996-2 indicators and I2C slave protocol
+ * as the ESP32-C3 + MAX4466 node, so existing masters work unchanged.
+ *
+ * Key difference vs. the analog node: level is computed directly from
+ * dBFS using the microphone sensitivity spec (-26 dBFS @ 94 dB SPL),
+ * so no acoustic calibrator is strictly required. MIC_OFFSET_DB allows
+ * an optional fine trim against a Class 1/2 reference meter.
+ *
  * Compliant with (orientative) requirements of Decree 213/2012 & UNE-ISO 1996-2.
  */
 
-#define ADC_CHANNEL ADC1_CHANNEL_4 // GPIO 4
+// Optional field trim (dB) applied on top of the datasheet sensitivity.
+#ifndef MIC_OFFSET_DB
+#define MIC_OFFSET_DB 0.0f
+#endif
+
+// Settle time: microphone power-up + IIR filter transient.
+#define WARMUP_MS 500
+
+// Any live ICS-43434 shows its own noise floor (~1e-5 FS peak).
+// Below this the data line is stuck/disconnected.
+#define MIC_MIN_PEAK_FS 1e-6f
 
 // Stats
 PeriodStats statsDay = {0.0f, 0};
@@ -42,15 +59,6 @@ PeriodStats statsNight = {0.0f, 0};
 float stat_buffer[STAT_SAMPLES];
 int stat_idx = 0;
 
-esp_adc_cal_characteristics_t adc_chars;
-float dc_offset = 2048.0;
-
-// mV per ADC count (calibrated slope, no intercept). An AC amplitude such as
-// an RMS must NOT go through esp_adc_cal_raw_to_voltage(): that function maps
-// absolute codes to absolute mV and adds the calibration intercept, which
-// distorts the dB law at low levels. Computed once in ruido_setup().
-float adc_mv_per_count = 1.0f;
-
 // Task synchronization
 TaskHandle_t aggregator_task_handle = NULL;
 
@@ -59,6 +67,7 @@ struct RawSecondData {
     float max_fast_sq;
     double sum_sq_A;
     uint32_t samples_count;
+    float max_abs_fs;      // raw peak (FS) for mic-alive detection
 };
 QueueHandle_t timerToTaskQueue;
 
@@ -66,50 +75,50 @@ void SerialLog(const char *level, const char *msg) {
     Serial.printf("[%s] %s\n", level, msg);
 }
 
-bool check_microphone_connection(uint32_t bias_mv) {
-    return (bias_mv > 800 && bias_mv < 2600); // 3.3V bias check
-}
-
 /**
- * High Priority Sampling Task (Polling)
- * Senior Programmer Note: On Single-Core C3, polling at 16kHz is MORE efficient 
- * than esp_timer because it eliminates 16,000 task context switches per second.
+ * High Priority Sampling Task (I2S DMA)
+ * Blocks on i2s_read(); the DMA engine paces the loop at exactly
+ * SAMPLE_RATE, so no polling/timers are needed and the I2C slave
+ * callbacks are serviced during the blocking wait.
  */
 void sampling_task(void *pvParameters) {
+    static float block[MIC_I2S_READ_LEN];
+
     int samples_count = 0;
     double sum_sq_A = 0.0;
     float fast_ema_sq = 0.0f;
     float slow_ema_sq = 0.0f;
     float max_fast_sq = 0.0f;
     float max_slow_sq = 0.0f;
+    float max_abs_fs = 0.0f;
 
+    // Same time constants as the C3 node (per-sample EMA @ 16 kHz)
     const float alpha_fast = 0.000500f; // Fast = 125ms
     const float alpha_slow = 0.000062f; // Slow = 1s
 
-    uint32_t next_sample_time = micros();
+    float dc_offset = 0.0f;
+
+    // Discard mic power-up + filter transient
+    uint32_t t0 = millis();
+    while (millis() - t0 < WARMUP_MS) {
+        MIC_I2S_Read(block, MIC_I2S_READ_LEN);
+    }
 
     while (1) {
-        uint32_t now = micros();
-        // Wrap-safe elapsed check: a direct `now >= next_sample_time` breaks
-        // at the micros() rollover (every ~71.6 min). If a blocking event
-        // straddled the rollover, sampling froze for up to ~71 min and the
-        // cached struct was served unchanged (flat line in dashboards).
-        int32_t behind = (int32_t)(now - next_sample_time);
-        if (behind >= 0) {
-            // If pathologically late (>100 ms blocked), resync instead of
-            // burst-sampling to catch up with a compressed, invalid second.
-            if (behind > 100000) {
-                next_sample_time = now;
-            }
+        size_t n = MIC_I2S_Read(block, MIC_I2S_READ_LEN);
 
-            uint32_t raw = adc1_get_raw(ADC_CHANNEL);
+        if (MIC_I2S_LastPeak() > max_abs_fs) {
+            max_abs_fs = MIC_I2S_LastPeak();
+        }
 
-            dc_offset = (dc_offset * 0.9999f) + ((float)raw * 0.0001f);
-            float signal = (float)raw - dc_offset;
+        for (size_t i = 0; i < n; i++) {
+            // Residual DC tracking (digital mics carry a small DC offset)
+            dc_offset = (dc_offset * 0.9999f) + (block[i] * 0.0001f);
+            float signal = block[i] - dc_offset;
 
             float filtered = signal;
-            for (int i = 0; i < 3; i++) {
-                filtered = DSP_ApplyFilter(filtered, aWeightingFilters[i]);
+            for (int k = 0; k < 3; k++) {
+                filtered = DSP_ApplyFilter(filtered, aWeightingFilters[k]);
             }
 
             float sq = filtered * filtered;
@@ -127,27 +136,35 @@ void sampling_task(void *pvParameters) {
                 RawSecondData secData = {
                     .max_fast_sq = max_fast_sq,
                     .sum_sq_A = sum_sq_A,
-                    .samples_count = (uint32_t)samples_count
+                    .samples_count = (uint32_t)samples_count,
+                    .max_abs_fs = max_abs_fs
                 };
                 xQueueOverwrite(timerToTaskQueue, &secData);
 
                 sum_sq_A = 0.0;
                 max_fast_sq = 0.0f;
                 max_slow_sq = 0.0f;
+                max_abs_fs = 0.0f;
                 samples_count = 0;
             }
-
-            next_sample_time += SAMPLE_PERIOD_US;
-        } else {
-            // Dead time between samples (~62us window).
-            // Release the CPU so I2C slave callbacks can be serviced.
-            taskYIELD();
         }
     }
 }
 
 /**
+ * dBFS -> dB SPL using the ICS-43434 sensitivity spec.
+ * At 94 dB SPL / 1 kHz the mic outputs -26 dBFS, therefore:
+ *   L = MIC_REF_DB + 20*log10(rms_fs) - MIC_SENSITIVITY_DBFS + MIC_OFFSET_DB
+ */
+static inline float fs_to_spl(float rms_fs) {
+    return MIC_REF_DB + 20.0f * log10f(rms_fs) - MIC_SENSITIVITY_DBFS + MIC_OFFSET_DB;
+}
+
+/**
  * Aggregator Task (Runs once per second, woken by Queue)
+ * Identical ISO 1996-2 logic to the C3 node: LAeq/LAFmax per second,
+ * L10/L90 over a rolling 20 s window, Ld/Le/Ln accumulation by period
+ * and Lden when device time is available.
  */
 void aggregator_task(void *pvParameters) {
     RawSecondData secData;
@@ -156,14 +173,16 @@ void aggregator_task(void *pvParameters) {
 
     while (1) {
         if (xQueueReceive(timerToTaskQueue, &secData, pdMS_TO_TICKS(2000)) == pdTRUE) {
-            
+
             float mean_sq_A = (float)(secData.sum_sq_A / secData.samples_count);
-            // Full float chain: no integer truncation. Near the noise floor the
-            // A-weighted RMS is only a few mV; truncating to integer counts and
-            // integer mV quantized LAeq into ~2.5 dB steps (flat lines at the
-            // floor, e.g. a constant 58.7 dB).
-            float voltage_rms_A = sqrtf(mean_sq_A) * adc_mv_per_count;
-            float voltage_fast_max = sqrtf(secData.max_fast_sq) * adc_mv_per_count;
+            float rms_fs = sqrtf(mean_sq_A);
+            float peak_fast_fs = sqrtf(secData.max_fast_sq);
+
+            // Legacy mV fields carry micro-FS units on this node (digital mic
+            // has no analog voltage). Documented in README; dB fields are the
+            // primary output.
+            uint32_t rms_ufs = (uint32_t)(rms_fs * 1e6f);
+            uint32_t peak_ufs = (uint32_t)(peak_fast_fs * 1e6f);
 
             // Defaults: hold last valid values (never publish 0 dB on an
             // invalid second; a zero sample poisons Grafana/averages).
@@ -177,20 +196,18 @@ void aggregator_task(void *pvParameters) {
             float le_local = localSensorData.Le;
             float ln_local = localSensorData.Ln;
 
-            // 0.05 mV floor avoids log10(0) and flags dead-input seconds
-            // (mic supply glitch, stuck ADC) as invalid.
-            bool valid_sample = (voltage_rms_A > 0.05f && CALIBRATION_RMS_MV > 0.0f);
+            bool mic_ok_local = (secData.max_abs_fs > MIC_MIN_PEAK_FS);
+            bool valid_sample = mic_ok_local && (rms_fs > 0.0f);
+
             if (valid_sample) {
-                laeq_local = 20.0f * log10f(voltage_rms_A / CALIBRATION_RMS_MV) + CALIBRATION_DB;
-                lafmax_local = 20.0f * log10f(voltage_fast_max / CALIBRATION_RMS_MV) + CALIBRATION_DB;
+                laeq_local = fs_to_spl(rms_fs);
+                lafmax_local = fs_to_spl(peak_fast_fs);
 
                 if (stat_idx < STAT_SAMPLES) {
                     stat_buffer[stat_idx++] = laeq_local;
                 }
 
-                // Percentiles over a FULL 20 s window. Resetting stat_idx every
-                // second (previous behavior) meant the buffer never held more
-                // than 1 sample, so L10/L90 were just the last LAeq.
+                // Percentiles over a FULL 20 s window (see main.cpp fix).
                 if (stat_idx >= STAT_SAMPLES) {
                     float temp_buf[STAT_SAMPLES];
                     memcpy(temp_buf, stat_buffer, STAT_SAMPLES * sizeof(float));
@@ -241,23 +258,20 @@ void aggregator_task(void *pvParameters) {
                 }
             }
 
-            uint32_t bias_mv = esp_adc_cal_raw_to_voltage((uint32_t)dc_offset, &adc_chars);
-            bool mic_ok_local = check_microphone_connection(bias_mv) && valid_sample;
-
-            // Build output struct. On an invalid second every field keeps its
-            // last valid value; only cycles advances and mic_ok reports the
-            // fault. Masters must gate publishing on the status byte.
+            // Build output struct (same layout as C3 node). On an invalid
+            // second every field keeps its last valid value; only cycles
+            // advances and mic_ok reports the fault.
             if (valid_sample) {
-                localSensorData.noise = (uint32_t)lroundf(voltage_rms_A);
-                localSensorData.noiseAvg = voltage_rms_A;
+                localSensorData.noise = rms_ufs;
+                localSensorData.noiseAvg = (float)rms_ufs;
                 localSensorData.noiseAvgDb = laeq_local;
-                localSensorData.noisePeak = voltage_fast_max;
+                localSensorData.noisePeak = (float)peak_ufs;
                 localSensorData.noisePeakDb = lafmax_local;
-                localSensorData.noiseMin = voltage_rms_A;
+                localSensorData.noiseMin = (float)rms_ufs;
                 localSensorData.noiseMinDb = laeq_local;
                 localSensorData.noiseAvgLegal = l10_local;
                 localSensorData.noiseAvgLegalDb = l10_local;
-                localSensorData.noiseAvgLegalMax = voltage_fast_max;
+                localSensorData.noiseAvgLegalMax = (float)peak_ufs;
                 localSensorData.noiseAvgLegalMaxDb = lafmax_local;
                 localSensorData.lowNoiseLevel = (l90_local > 0.0f) ? (uint16_t)l90_local : 0;
                 localSensorData.Ld = ld_local;
@@ -268,10 +282,11 @@ void aggregator_task(void *pvParameters) {
             localSensorData.cycles++;
 
             if (mic_ok_local) {
-                Serial.printf("[SMART] LAeq:%.1f | LAFmx:%.1f | L10:%.1f | L90:%.1f | RMS:%.2fmV | Lden:%.1f\n",
-                              laeq_local, lafmax_local, l10_local, l90_local, voltage_rms_A, lden_local);
+                Serial.printf("[ICS43434] LAeq:%.1f | LAFmx:%.1f | L10:%.1f | L90:%.1f | RMS:%luuFS | Lden:%.1f\n",
+                              laeq_local, lafmax_local, l10_local, l90_local,
+                              (unsigned long)rms_ufs, lden_local);
             } else {
-                SerialLog("WARN", "Microphone range error/disconnected");
+                SerialLog("WARN", "I2S microphone silent/disconnected (check SD line and L/R->GND)");
             }
 
             i2cMsg.data = localSensorData;
@@ -279,11 +294,10 @@ void aggregator_task(void *pvParameters) {
             xQueueOverwrite(dataQueue, &i2cMsg);
             I2C_Comm_Sync();
         } else {
-            // No second completed in 2 s: the sampling task is stalled.
-            // Surface the fault (status 0, frozen cycles) instead of silently
-            // serving a frozen struct forever, which draws a flat line at an
-            // arbitrary level in dashboards. Masters gate on the status byte.
-            SerialLog("WARN", "No samples for 2 s: sampling task stalled");
+            // No second completed in 2 s: I2S sampling stalled (driver or DMA
+            // fault). Surface it (status 0, frozen cycles) instead of serving
+            // a frozen struct. Masters gate on the status byte.
+            SerialLog("WARN", "No samples for 2 s: I2S sampling stalled");
             i2cMsg.data = localSensorData;
             i2cMsg.mic_ok = 0;
             xQueueOverwrite(dataQueue, &i2cMsg);
@@ -295,7 +309,7 @@ void aggregator_task(void *pvParameters) {
 void ruido_setup() {
     Serial.begin(115200);
     delay(1000);
-    SerialLog("INIT", "Smart City Noise Sensor (Class 1 Architecture)");
+    SerialLog("INIT", "Smart City Noise Sensor - XIAO ESP32-S3 + ICS-43434 (I2S)");
 
     dataQueue = xQueueCreate(1, sizeof(I2cPayloadMessage));
     timerToTaskQueue = xQueueCreate(1, sizeof(RawSecondData));
@@ -308,36 +322,27 @@ void ruido_setup() {
     DSP_Init();
     I2C_Comm_Init();
 
-#if defined(ESP32S2) || defined(CONFIG_IDF_TARGET_ESP32S2)
-    adc1_config_channel_atten(ADC_CHANNEL, ADC_ATTEN_DB_11);
-    esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN_DB_11, ADC_WIDTH_BIT_13, REF_VOLTAGE, &adc_chars);
-    dc_offset = 4096.0f;
-#else
-    adc1_config_channel_atten(ADC_CHANNEL, ADC_ATTEN_DB_12);
-    esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN_DB_12, ADC_WIDTH_BIT_12, REF_VOLTAGE, &adc_chars);
-    dc_offset = 2048.0f;
-#endif
-
-    // Calibrated slope in mV/count (differential, intercept removed):
-    // valid for converting AC amplitudes such as the A-weighted RMS.
-    adc_mv_per_count = (float)(esp_adc_cal_raw_to_voltage(3000, &adc_chars) -
-                               esp_adc_cal_raw_to_voltage(1000, &adc_chars)) / 2000.0f;
-    Serial.printf("[INIT] ADC slope: %.4f mV/count\n", adc_mv_per_count);
+    if (!MIC_I2S_Init()) {
+        SerialLog("ERR", "I2S driver install failed");
+        while (1) delay(1000);
+    }
+    Serial.printf("[INIT] I2S mic OK BCLK=%d WS=%d SD=%d @ %d Hz\n",
+                  MIC_I2S_BCLK, MIC_I2S_WS, MIC_I2S_DIN, SAMPLE_RATE);
 
     // Launch Aggregator Task
-    xTaskCreate(aggregator_task, "DSP_AGG", 8192, NULL, configMAX_PRIORITIES - 5, &aggregator_task_handle); 
+    xTaskCreatePinnedToCore(aggregator_task, "DSP_AGG", 8192, NULL,
+                            configMAX_PRIORITIES - 5, &aggregator_task_handle, 0);
 
-    // Launch Sampling Task
-    // Note: Priority MUST be lower than the I2C interrupt handler priority.
-    // On ESP32-C3, I2C slave callbacks are ISR-based, but high RTOS task priority
-    // can still delay their proper execution via interrupt latency.
-    xTaskCreate(sampling_task, "ADC_SAM", 8192, NULL, 5, NULL);
+    // Launch Sampling Task pinned to core 1: the S3 is dual-core, so the
+    // acoustic chain never competes with WiFi/BLE/I2C running on core 0.
+    xTaskCreatePinnedToCore(sampling_task, "I2S_SAM", 8192, NULL,
+                            configMAX_PRIORITIES - 3, NULL, 1);
 }
 
-void setup() { 
-    ruido_setup(); 
+void setup() {
+    ruido_setup();
 }
 
-void loop() { 
-    vTaskDelete(NULL); 
+void loop() {
+    vTaskDelete(NULL);
 }

@@ -1,23 +1,47 @@
-# Environmental Noise Meter (ESP32-C3 Slave + ESP32-S2/S3 Master)
+# Environmental Noise Meter (ESP32 Slave + ESP32-S2/S3 Master)
 
-This repository contains an I2C distributed noise monitoring setup:
-- `src/`: ESP32-C3 firmware acting as I2C slave and acoustic processing node.
+This repository contains an I2C distributed noise monitoring setup with two
+interchangeable acoustic node variants sharing the same DSP chain, ISO 1996-2
+indicators and I2C slave protocol:
+- `src/main.cpp`: ESP32-C3 node with **MAX4466 analog mic** (ADC sampling).
+- `src/main_i2s.cpp`: **XIAO ESP32-S3 node with ICS-43434 digital I2S MEMS mic**
+  (recommended: ~30 dBA noise floor vs ~55-60 dB of the analog chain, factory
+  sensitivity spec, immune to supply/ADC noise).
 - `examples/`: ESP32-S2/ESP32-S3 firmware acting as I2C master/reader.
 
 ## Features
-- ADC sampling and DSP processing for acoustic indicators.
+- ADC (MAX4466) or I2S DMA (ICS-43434) sampling and DSP processing for acoustic indicators.
+- A-weighting (16 kHz cascaded biquads), LAeq(1s), LAFmax, L10/L90.
 - I2C slave protocol compatible with current and legacy masters.
 - Structured payload (`SensorData`) for robust host integration.
 - Basic long-term indicators (`Ld`, `Le`, `Ln`, `Lden`) when device time is available.
 
 ## Hardware Wiring
 
-### 1) Sensor Node (ESP32-C3, I2C slave)
+### 1a) Sensor Node (ESP32-C3 + MAX4466, I2C slave)
 | Signal | ESP32-C3 Pin |
 | :--- | :--- |
 | MIC OUT (MAX4466) | GPIO 4 |
 | I2C SDA | GPIO 8 |
 | I2C SCL | GPIO 10 |
+
+### 1b) Sensor Node (XIAO ESP32-S3 + ICS-43434, I2C slave)
+| Signal | XIAO ESP32-S3 Pin |
+| :--- | :--- |
+| ICS-43434 SCK (BCLK) | GPIO 2 (D1) |
+| ICS-43434 WS (LRCLK) | GPIO 3 (D2) |
+| ICS-43434 SD | GPIO 4 (D3) |
+| ICS-43434 L/R | GND |
+| ICS-43434 VDD | 3.3V |
+| I2C SDA | GPIO 5 (D4) |
+| I2C SCL | GPIO 6 (D5) |
+
+Notes for the I2S node:
+- Keep the SCK/WS/SD wires short (<10 cm); BCLK runs at ~1 MHz.
+- On this node the legacy "mV" fields of `SensorData` (`noise`, `noiseAvg`,
+  `noisePeak`, ...) carry micro-full-scale units (µFS) instead of millivolts,
+  since a digital mic has no analog voltage. The dB fields are the primary
+  output and keep identical semantics on both nodes.
 
 ### 2) Master Node
 
@@ -59,9 +83,14 @@ Notes:
 
 ## Build and Flash (PlatformIO)
 
-Slave (ESP32-C3):
+Slave (ESP32-C3 + MAX4466):
 - Open repository root in VSCode/PlatformIO.
 - Build/upload environment: `lolin_c3_mini`.
+
+Slave (XIAO ESP32-S3 + ICS-43434):
+- Open repository root in VSCode/PlatformIO.
+- Build/upload environment: `seeed_xiao_esp32s3`.
+- Optional fine trim vs a reference meter: `-D MIC_OFFSET_DB=<dB>` in `build_flags`.
 
 Master examples:
 - Open `examples/` in VSCode/PlatformIO.
@@ -72,6 +101,13 @@ Master examples:
 - **Constants** in `src/main.cpp`: `CALIBRATION_DB` (e.g. 94.0), `CALIBRATION_RMS_MV` (measured with calibrator).
 - **Procedure and MAX4466 setup** (wiring, potentiometer gain, ISO 1996-2 / Decreto 213/2012): **[docs/CALIBRACION.md](docs/CALIBRACION.md)**.
 - **Calibration firmware** (standalone, Serial output of RMS mV and LAeq): run the example in **`examples/calibration/`** (env `lolin_c3_mini`), then use the stable RMS (mV) value as `CALIBRATION_RMS_MV` in the main firmware.
+
+ICS-43434 node (XIAO ESP32-S3):
+- The digital mic has a **factory sensitivity spec** (-26 dBFS @ 94 dB SPL), so LAeq
+  is computed directly from dBFS and no calibrator is strictly required.
+- **Verification firmware**: run **`examples/calibration_i2s/`** (env `seeed_xiao_esp32s3`).
+  With a 94 dB calibrator, if the reported LAeq differs from 94.0, set
+  `-D MIC_OFFSET_DB=<94.0 - measured LAeq>` in the main firmware `build_flags`.
 
 ## License
 GPL-3.0. See `LICENSE`.
