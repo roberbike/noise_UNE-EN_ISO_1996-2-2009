@@ -4,6 +4,36 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [3.1.3] - 2026-07-23
+
+### Added
+
+- `docs/COMUNICACION.md`: protocol reference (I2C commands, status contract,
+  master-side triple validation, data semantics), now including the I2S mic
+  wiring and the master I2C connection notes.
+- `docs/images/ics43434_mrs179a.png`: photo of the ICS-43434 breakout, used in
+  the README and example docs so the silkscreen labels can be matched directly.
+- `examples/calibration_i2s/README.md`: expected output (~34 dB floor with real
+  sample trace), explanation of the constant L10/L90 and `Lden = 0.0` on the
+  standalone firmware, and a troubleshooting table.
+
+### Changed
+
+- **Wiring documentation corrected**: `SEL` on the MRS179A breakout is the
+  ICS-43434 `L/R` channel-select pin, **not** an I2S/PDM mode selector as some
+  vendor listings claim (the ICS-43434 has no PDM mode). SEL must be **LOW /
+  GND**; tying it to 3.3V selects the right channel and the node stops
+  measuring entirely. Bench-verified. Tables now use the breakout's own
+  silkscreen labels (SEL/LRCL/DOUT/BCLK/3V) with a mapping note for boards
+  using WS/SD/LR.
+- README documents the master I2C connection (SDA=D4, SCL=D5, address 0x08,
+  common ground, pull-up and cable-length guidance).
+- `platformio.ini`: `-D I2S_SUPPRESS_DEPRECATE_WARN=1` and
+  `-Wno-deprecated-declarations` on the S3 environment — the legacy I2S API is
+  deprecated in IDF 5.x but kept for core 2.x compatibility.
+
+---
+
 ## [3.1.2] - 2026-07-18
 
 ### Fixed
