@@ -72,11 +72,13 @@ bool NoiseAggregator::process(const SecondInput &in, SensorData &out, uint8_t &m
                     }
                 }
             }
-            last_.noiseAvgLegal = tmp[AGG_STAT_SAMPLES / 10];    // L10
-            last_.noiseAvgLegalDb = tmp[AGG_STAT_SAMPLES / 10];
-            last_.lowNoiseLevel = (tmp[AGG_STAT_SAMPLES * 9 / 10] > 0.0f)
-                                    ? (uint16_t)tmp[AGG_STAT_SAMPLES * 9 / 10]  // L90
-                                    : 0;
+            float l10 = tmp[AGG_STAT_SAMPLES / 10];
+            float l90 = tmp[AGG_STAT_SAMPLES * 9 / 10];
+            last_.noiseAvgLegal = l10;
+            last_.noiseAvgLegalDb = l10;
+            // L90 stored as uint16_t; clamp to valid range (SPL is never
+            // negative, but guard the cast against a spurious sub-zero value).
+            last_.lowNoiseLevel = (l90 > 0.0f) ? (uint16_t)(l90 + 0.5f) : 0;
             stat_idx_ = 0;
         }
 

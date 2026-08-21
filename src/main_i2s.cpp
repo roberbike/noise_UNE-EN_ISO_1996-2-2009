@@ -168,7 +168,9 @@ void aggregator_task(void *pvParameters) {
             };
 
             bool valid = aggregator.process(in, out, mic_ok);
-            I2C_Comm_SetClipCount(secData.clip_count); // #12 metadata
+            // uint32_t -> uint16_t: at 16 kHz a second never reaches 65535
+            // clips, but the explicit cast silences -Wconversion.
+            I2C_Comm_SetClipCount((uint16_t)secData.clip_count); // #12 metadata
 
             if (valid) {
                 Serial.printf("[ICS43434] LAeq:%.1f | LAFmx:%.1f | L10:%.1f | L90:%d | RMS:%.0fuFS | Lden:%.1f | clip:%u | cyc:%u\n",
@@ -223,13 +225,18 @@ void ruido_setup() {
     // dBFS->SPL via sensitivity; 1e-5 FS floor flags a dead SD line.
     aggregator.begin(i2s_fs_to_db, 1.0f, MIC_MIN_RMS_FS);
 
+    // #13 task watchdog. Arduino-ESP32 already inits the TWDT for loop();
+    // reconfigure instead of re-init (see main.cpp). Sampling task subscribes
+    // via esp_task_wdt_add(NULL).
 #if ESP_IDF_VERSION_MAJOR >= 5
     esp_task_wdt_config_t wdt_cfg = {
         .timeout_ms = WDT_TIMEOUT_S * 1000,
         .idle_core_mask = 0,
         .trigger_panic = true
     };
-    esp_task_wdt_init(&wdt_cfg);
+    if (esp_task_wdt_reconfigure(&wdt_cfg) == ESP_ERR_INVALID_STATE) {
+        esp_task_wdt_init(&wdt_cfg);
+    }
 #else
     esp_task_wdt_init(WDT_TIMEOUT_S, true);
 #endif

@@ -86,12 +86,9 @@ void sampling_task(void *pvParameters) {
     int samples_count = 0;
     double sum_sq_A = 0.0;
     float fast_ema_sq = 0.0f;
-    float slow_ema_sq = 0.0f;
     float max_fast_sq = 0.0f;
-    float max_slow_sq = 0.0f;
 
     const float alpha_fast = 0.000500f; // Fast = 125ms
-    const float alpha_slow = 0.000062f; // Slow = 1s
 
     uint32_t next_sample_time = micros();
 
@@ -119,10 +116,7 @@ void sampling_task(void *pvParameters) {
             sum_sq_A += (double)sq;
 
             fast_ema_sq = (sq * alpha_fast) + (fast_ema_sq * (1.0f - alpha_fast));
-            slow_ema_sq = (sq * alpha_slow) + (slow_ema_sq * (1.0f - alpha_slow));
-
             if (fast_ema_sq > max_fast_sq) max_fast_sq = fast_ema_sq;
-            if (slow_ema_sq > max_slow_sq) max_slow_sq = slow_ema_sq;
 
             samples_count++;
 
@@ -137,7 +131,6 @@ void sampling_task(void *pvParameters) {
 
                 sum_sq_A = 0.0;
                 max_fast_sq = 0.0f;
-                max_slow_sq = 0.0f;
                 samples_count = 0;
             }
 
@@ -235,15 +228,23 @@ void ruido_setup() {
     // 0.05 mV floor flags dead-input seconds.
     aggregator.begin(adc_amp_to_db, adc_mv_per_count, 0.05f);
 
-    // #13 task watchdog (IDF 5.x init struct; fallback for older cores)
+    // #13 task watchdog. Arduino-ESP32 already initializes the TWDT for the
+    // loop() task, so calling esp_task_wdt_init() again returns
+    // ESP_ERR_INVALID_STATE (and can disturb the loop task). Reconfigure the
+    // existing TWDT instead; the sampling task subscribes via
+    // esp_task_wdt_add(NULL) and feeds it once per completed second.
 #if ESP_IDF_VERSION_MAJOR >= 5
     esp_task_wdt_config_t wdt_cfg = {
         .timeout_ms = WDT_TIMEOUT_S * 1000,
         .idle_core_mask = 0,
         .trigger_panic = true
     };
-    esp_task_wdt_init(&wdt_cfg);
+    // reconfigure if already running, otherwise init (bare-IDF builds).
+    if (esp_task_wdt_reconfigure(&wdt_cfg) == ESP_ERR_INVALID_STATE) {
+        esp_task_wdt_init(&wdt_cfg);
+    }
 #else
+    // On 4.x, re-init with a longer timeout is tolerated (idempotent enough).
     esp_task_wdt_init(WDT_TIMEOUT_S, true);
 #endif
 
