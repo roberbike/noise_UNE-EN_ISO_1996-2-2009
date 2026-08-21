@@ -38,9 +38,12 @@ Suelo de ruido en interior tranquilo: **~34 dB**, con variación segundo a
 segundo (frente a ~58-60 dB clavados del nodo MAX4466). Ejemplo real:
 
 ```
-[ICS43434] LAeq:34.8 | LAFmx:36.1 | L10:34.9 | L90:34.0 | RMS:55uFS | Lden:0.0
-[ICS43434] LAeq:40.7 | LAFmx:47.2 | L10:34.7 | L90:34.0 | RMS:108uFS | Lden:0.0
+[ICS43434] LAeq:34.8 | LAFmx:36.1 | L10:34.9 | L90:34 | RMS:55uFS | Lden:0.0 | clip:0 | cyc:21
+[ICS43434] LAeq:40.7 | LAFmx:47.2 | L10:34.7 | L90:34 | RMS:108uFS | Lden:0.0 | clip:0 | cyc:22
 ```
+
+El significado de cada indicador (LAeq, LAFmax, L10, L90, Lden) está en el
+README principal, sección "Qué significan las medidas".
 
 Notas sobre esa salida:
 - **L10/L90 se mantienen constantes** entre bloques: se recalculan cada 20 s
@@ -55,5 +58,6 @@ Notas sobre esa salida:
 | :--- | :--- |
 | `[WARN] Silencio absoluto` | SEL a 3.3 V, o línea DOUT sin conectar |
 | Silencio con SEL a GND | Módulo con `L/R` fijado en alto: usar `I2S_CHANNEL_FMT_ONLY_RIGHT` |
+| `[WARN] Clipping detected` con `clip:` alto | Nivel > ~120 dB SPL o interferencia; el segundo se invalida (integridad) |
 | Lecturas erráticas | Cables largos (>10 cm) en BCLK/DOUT, o masa mal referenciada |
 | Avisos de compilación sobre API obsoleta | Normal en core 3.x; ver `platformio.ini` (flags de supresión) |

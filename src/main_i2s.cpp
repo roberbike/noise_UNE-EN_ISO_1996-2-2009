@@ -89,7 +89,9 @@ void sampling_task(void *pvParameters) {
     float max_abs_fs = 0.0f;
     uint32_t clip_acc = 0;
 
-    const float alpha_fast = 0.000500f; // 125 ms
+    // Fast time weighting = 125 ms. alpha = 1/(0.125 s * fs), so it tracks the
+    // sample rate automatically (1/2000 at 16 kHz, 1/6000 at 48 kHz).
+    const float alpha_fast = 1.0f / (0.125f * SAMPLE_RATE);
 
     float dc_offset = 0.0f;
 

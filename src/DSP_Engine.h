@@ -20,10 +20,17 @@
 #include <math.h>
 
 // --- Configuration ---
-#define SAMPLE_RATE 16000          // Reduced sampling to avoid I2C blocking
+// SAMPLE_RATE is overridable via build_flags (-D SAMPLE_RATE=48000).
+// Supported: 16000 (default, ADC node) and 48000 (I2S node, wider band /
+// Class-1 headroom). Each rate has its own A-weighting coefficient set,
+// selected at compile time in DSP_Engine.cpp.
+#ifndef SAMPLE_RATE
+#define SAMPLE_RATE 16000
+#endif
 #define SAMPLE_PERIOD_US (1000000 / SAMPLE_RATE)
 
-static_assert(SAMPLE_RATE == 16000, "Biquad coefficients assume 16kHz sampling rate");
+static_assert(SAMPLE_RATE == 16000 || SAMPLE_RATE == 48000,
+              "A-weighting coefficients are only provided for 16 kHz and 48 kHz");
 
 #define CALIBRATION_DB 94.0f      // Target dB (Calibrator)
 #define CALIBRATION_RMS_MV 166.0f // Measured RMS mV at 94dB

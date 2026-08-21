@@ -4,6 +4,26 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [3.2.1] - 2026-08-21
+
+### Changed
+
+- **README reescrito** en español con tablas comparativas de las dos placas
+  (ESP32-C3 vs XIAO ESP32-S3) y los dos micrófonos (MAX4466 vs ICS-43434),
+  una sección que explica qué significa cada indicador acústico (LAeq, LAFmax,
+  L10, L90, Ld/Le/Ln, Lden) y el encuadre normativo UNE-EN ISO 1996-2 /
+  IEC 61672-1 (dónde queda el sistema respecto a Clase 1/2 y para qué es o no
+  legalmente válido). Índice navegable.
+- READMEs de ejemplos rehechos: `i2c_master` documenta la validación triple y
+  los metadatos; `calibration` (ADC) y `calibration_i2s` (I2S) explican el
+  suelo de ruido esperado de cada micrófono y remiten al significado de las
+  medidas.
+- `docs/ESTUDIO_TECNICO.md` corregido para reflejar el estado real del código:
+  muestreo a 16 kHz (no 22.05), cascada de 3 biquads, y sólo ponderación
+  temporal Fast (la Slow no se reporta).
+
+---
+
 ## [3.2.0] - 2026-07-24
 
 ### Added
