@@ -44,11 +44,15 @@
 #endif
 
 #define MIC_I2S_PORT      I2S_NUM_0
-#define MIC_I2S_READ_LEN  256   // frames per i2s_read() block (16 ms @ 16 kHz)
+#define MIC_I2S_READ_LEN  512   // frames per i2s_read() block (32 ms @ 16 kHz)
 
 // --- Acoustic characteristics (ICS-43434) ---
 #define MIC_SENSITIVITY_DBFS (-26.0f) // dBFS output at MIC_REF_DB SPL
 #define MIC_REF_DB           94.0f    // SPL reference of the sensitivity spec
+
+// #3 clipping detection: |sample| above this fraction of full scale counts as
+// a clip. The ICS-43434 saturates near ±1.0 FS at ~120 dB SPL / on strong EMI.
+#define MIC_CLIP_THRESHOLD   0.99f
 
 /**
  * Install and start the I2S RX driver.
@@ -69,5 +73,11 @@ size_t MIC_I2S_Read(float *out, size_t max_samples);
  * (~1e-5 FS); a stuck-at-zero data line reads as silence below that.
  */
 float MIC_I2S_LastPeak();
+
+/**
+ * Number of samples that hit full scale (|s| > MIC_CLIP_THRESHOLD) in the
+ * last read. Accumulated by the caller across a 1 s window to gate validity.
+ */
+uint32_t MIC_I2S_LastClipCount();
 
 #endif // MIC_I2S_H

@@ -4,6 +4,71 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [3.2.0] - 2026-07-24
+
+### Added
+
+- **Shared `NoiseAggregator`** (`src/NoiseAggregator.{h,cpp}`): the per-second
+  ISO 1996-2 math (LAeq/LAFmax, L10/L90, Ld/Le/Ln, Lden, hold-last-valid) now
+  lives in one place instead of being duplicated in `main.cpp` and
+  `main_i2s.cpp`. Each node injects its own amplitude->dB conversion and keeps
+  only its platform-specific sampling task. A fix now lands once, not twice.
+- **Clipping detection (I2S)**: `MIC_I2S.cpp` counts samples at full scale
+  (>0.99 FS) per read; a second with more than 10 clips is invalidated
+  (`mic_ok = 0`), protecting metrological integrity against >120 dB SPL or EMI.
+- **Time-sync gate for Ld/Le/Ln/Lden**: period indicators are only accumulated
+  once the master has set the clock (`CMD_SET_TIME_LEGACY`). Prevents polluting
+  the day/evening/night bands with 1970-epoch data before the first sync.
+- **Task watchdog** (`esp_task_wdt`) on both sampling tasks: a hung
+  `i2s_read`/ADC loop now resets the chip instead of running mute. Complements
+  the v3.1.2 stall detection (which reports the fault; the watchdog recovers).
+- **Node metadata over I2C** (`CMD_GET_METADATA`, 0x50): firmware version,
+  node type (0x01 ADC / 0x02 I2S), `time_synced` flag and last-second clip
+  count. The example master reads and prints it.
+- Example master now performs the **triple freshness validation** (complete
+  read + status == 1 + `cycles` advancing) and only forwards publishable
+  samples — the reference fix for the Grafana flat lines.
+
+### Changed
+
+- **`MIC_MIN_RMS_FS` raised from 1e-6 to 1e-5 FS**: the old threshold (~0 dB
+  SPL) never fired; the ICS-43434's real noise floor is ~1e-5 FS (~30 dBA), so
+  the new value detects a dead SD line without false positives.
+- **I2S DMA block size 256 -> 512 frames** (16 ms -> 32 ms): fewer context
+  switches, still well under the 125 ms fast window for LAFmax.
+
+---
+
+## [3.1.3] - 2026-07-23
+
+### Added
+
+- `docs/COMUNICACION.md`: protocol reference (I2C commands, status contract,
+  master-side triple validation, data semantics), now including the I2S mic
+  wiring and the master I2C connection notes.
+- `docs/images/ics43434_mrs179a.png`: photo of the ICS-43434 breakout, used in
+  the README and example docs so the silkscreen labels can be matched directly.
+- `examples/calibration_i2s/README.md`: expected output (~34 dB floor with real
+  sample trace), explanation of the constant L10/L90 and `Lden = 0.0` on the
+  standalone firmware, and a troubleshooting table.
+
+### Changed
+
+- **Wiring documentation corrected**: `SEL` on the MRS179A breakout is the
+  ICS-43434 `L/R` channel-select pin, **not** an I2S/PDM mode selector as some
+  vendor listings claim (the ICS-43434 has no PDM mode). SEL must be **LOW /
+  GND**; tying it to 3.3V selects the right channel and the node stops
+  measuring entirely. Bench-verified. Tables now use the breakout's own
+  silkscreen labels (SEL/LRCL/DOUT/BCLK/3V) with a mapping note for boards
+  using WS/SD/LR.
+- README documents the master I2C connection (SDA=D4, SCL=D5, address 0x08,
+  common ground, pull-up and cable-length guidance).
+- `platformio.ini`: `-D I2S_SUPPRESS_DEPRECATE_WARN=1` and
+  `-Wno-deprecated-declarations` on the S3 environment — the legacy I2S API is
+  deprecated in IDF 5.x but kept for core 2.x compatibility.
+
+---
+
 ## [3.1.2] - 2026-07-18
 
 ### Fixed

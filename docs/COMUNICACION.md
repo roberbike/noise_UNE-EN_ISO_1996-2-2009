@@ -17,6 +17,59 @@
 ### I2S (micrófono digital)
 - `MIC_I2S_Init()` en [src/MIC_I2S.cpp](../src/MIC_I2S.cpp) instala el driver I2S (24 bits en trama de 32, canal izquierdo, 16 kHz), fija pines (BCLK=2, WS=3, SD=4) y buffers DMA. La lectura es bloqueante con `i2s_read()`.
 
+#### Cableado del módulo ICS-43434 (breakout MRS179A)
+
+![Módulo ICS-43434 MRS179A](images/ics43434_mrs179a.png)
+
+| Pin del módulo | XIAO ESP32-S3 | Función |
+| :--- | :--- | :--- |
+| SEL | **GND** | Selección de canal: bajo = izquierdo |
+| LRCL | GPIO 3 (D2) | Word select (WS / LRCLK) |
+| DOUT | GPIO 4 (D3) | Salida de datos del micrófono |
+| BCLK | GPIO 2 (D1) | Reloj de bit |
+| GND | GND | Masa |
+| 3V | 3.3V | Alimentación (1.5-3.6 V, nunca 5 V) |
+
+**SEL debe ir a GND.** En este breakout `SEL` es el pin `L/R` (selección de
+canal) del ICS-43434, pese a que algunas descripciones de vendedor lo presenten
+como selector I2S/PDM — el ICS-43434 no tiene modo PDM. Con
+`I2S_CHANNEL_FMT_ONLY_LEFT` en el firmware: SEL bajo (o al aire, por el
+pull-down interno) → canal izquierdo → se lee correctamente (verificado en
+banco, suelo de ~34 dB); SEL a 3.3 V → canal derecho → el firmware descarta esa
+media trama → **no mide nada**. Al aire funciona pero depende de un pull-down
+débil: en despliegue de campo, atarlo a masa.
+
+Otros breakouts pueden etiquetar `LRCL` como `WS`/`LRCLK`, `DOUT` como `SD` y
+`SEL` como `L/R`. Si un módulo tiene `L/R` fijado a nivel alto internamente y el
+nodo lee silencio, cambiar a `I2S_CHANNEL_FMT_ONLY_RIGHT` en `MIC_I2S.cpp`.
+
+#### Conexión I2C con el master (nodo I2S)
+
+SDA = GPIO 5 (D4), SCL = GPIO 6 (D5), dirección `0x08`. SDA-SDA, SCL-SCL y
+**masa común entre ambas placas**, imprescindible aunque cada una tenga su
+propia alimentación. La mayoría de placas ESP32 ya llevan pull-ups; solo si el
+bus falla o se cuelga, añadir 4.7 kΩ de SDA y SCL a 3.3 V en un único punto del
+bus. Para latiguillos de más de 20-30 cm, bajar el clock del master a 100 kHz.
+Pines sobreescribibles con `-D I2C_SDA=x -D I2C_SCL=y`; evitar GPIO 43/44 (UART
+del USB) y dejar libres GPIO 2/3/4 para el micrófono.
+
+#### Avisos de compilación (core Arduino 3.x / IDF 5.x)
+
+El driver `driver/i2s.h` está marcado como obsoleto en IDF 5.x, y los campos
+`dma_buf_count`/`dma_buf_len` son alias de `dma_desc_num`/`dma_frame_num`. Son
+avisos, no errores: el binario funciona correctamente. Para silenciarlos,
+añadir al entorno S3 en `platformio.ini`:
+
+```ini
+build_flags =
+    -D I2S_SUPPRESS_DEPRECATE_WARN=1
+    -Wno-deprecated-declarations
+```
+
+La migración a la API nueva (`driver/i2s_std.h`) queda pendiente; ataría el
+proyecto a core 3.x, mientras que la API legacy mantiene compatibilidad con
+cores 2.x.
+
 ### ADC (micrófono analógico)
 - En [src/main.cpp](../src/main.cpp) se configura el ADC con `adc1_config_channel_atten()` y `esp_adc_cal_characterize()`, y se deriva una pendiente `adc_mv_per_count` (solo pendiente, sin offset) para convertir amplitudes AC en float.
 
@@ -34,6 +87,7 @@ Definidos en [src/I2C_Comm.h](../src/I2C_Comm.h):
 | :--- | :--- | :--- |
 | `CMD_GET_STATUS` | 0x20 | 1 byte: 1 = OK, 0 = no publicar (ver §6) |
 | `CMD_GET_DATA` | 0x01 | `SensorData` completo empaquetado |
+| `CMD_GET_METADATA` | 0x50 | `NodeMetadata` (7 bytes): versión fw, tipo de nodo, time_synced, clip_count |
 | `CMD_IDENTIFY` | — | Identificación del nodo |
 | `CMD_LEGACY_*` | — | Lecturas puntuales simples (compatibilidad) |
 
@@ -44,6 +98,28 @@ Definidos en [src/I2C_Comm.h](../src/I2C_Comm.h):
 - **Muestreo detenido** (desde v3.1.2): si el agregador no recibe ningún segundo completo en 2 s, baja el status a 0, congela `cycles` y emite `[WARN] No samples for 2 s` por Serial. Un nodo colgado se ve como fallo, nunca como dato plano creíble.
 
 En segundos inválidos el esclavo conserva los últimos valores válidos en la estructura (nunca publica ceros); la señal de invalidez es exclusivamente el status.
+
+**Metadatos del nodo (`CMD_GET_METADATA`).** Devuelve 7 bytes empaquetados:
+
+| Offset | Campo | Tipo | Significado |
+| :--- | :--- | :--- | :--- |
+| 0 | fw_major | uint8 | Versión de firmware (mayor) |
+| 1 | fw_minor | uint8 | Versión (menor) |
+| 2 | fw_patch | uint8 | Versión (parche) |
+| 3 | node_type | uint8 | 0x01 = ADC/MAX4466, 0x02 = I2S/ICS-43434 |
+| 4 | time_synced | uint8 | 1 cuando el master ya ha fijado la hora |
+| 5-6 | clip_count | uint16 LE | Muestras a fondo de escala en el último segundo (nodo I2S) |
+
+El master puede usarlo para etiquetar la serie en InfluxDB por tipo de nodo,
+verificar que la hora está sincronizada antes de fiarse de Ld/Le/Ln, y detectar
+saturación acústica (`clip_count` alto de forma sostenida indica un nodo mal
+ubicado o con ganancia excesiva).
+
+**Detección de clipping (nodo I2S).** El firmware cuenta las muestras que tocan
+fondo de escala (>0.99 FS); si en un segundo hay más de 10, la lectura se
+invalida (status 0) en lugar de publicar un LAeq falseado por saturación. Un
+`clip_count` distinto de cero pero por debajo del umbral es una señal temprana
+de que el nivel se acerca al máximo del micrófono (~120 dB SPL).
 
 ## 5) Lado master: flujo recomendado
 

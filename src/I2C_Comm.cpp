@@ -31,6 +31,23 @@ static portMUX_TYPE cacheMux = portMUX_INITIALIZER_UNLOCKED;
 // so protocol-following masters never publish the boot-time zeroed struct.
 static volatile uint8_t data_ready = 0;
 
+// #12/#5 node metadata, updated by the node firmware and by the set-time path.
+static volatile uint8_t meta_node_type = 0x00;
+static volatile uint8_t meta_time_synced = 0;
+static volatile uint16_t meta_clip_count = 0;
+
+void I2C_Comm_SetNodeType(uint8_t node_type) {
+    meta_node_type = node_type;
+}
+
+void I2C_Comm_SetClipCount(uint16_t clip_count) {
+    meta_clip_count = clip_count;
+}
+
+bool I2C_Comm_TimeSynced() {
+    return meta_time_synced != 0;
+}
+
 volatile uint8_t i2c_active_command = CMD_GET_STATUS;
 
 static inline void update_i2c_command(uint8_t cmd) {
@@ -62,6 +79,7 @@ void receiveEvent(int bytes) {
         }
         struct timeval tv = {(long)timestamp, 0};
         settimeofday(&tv, NULL);
+        meta_time_synced = 1; // #5: enable Ld/Le/Ln computation
     }
 
     while (Wire.available()) {
@@ -110,6 +128,14 @@ void requestEvent() {
         case CMD_GET_DATA:
             Wire.write((uint8_t *)&snap, sizeof(SensorData));
             break;
+        case CMD_GET_METADATA: {
+            NodeMetadata meta = {
+                FW_VERSION_MAJOR, FW_VERSION_MINOR, FW_VERSION_PATCH,
+                meta_node_type, meta_time_synced, meta_clip_count
+            };
+            Wire.write((uint8_t *)&meta, sizeof(NodeMetadata));
+            break;
+        }
         case CMD_IDENTIFY: {
             uint8_t id[5] = {0x01, 0x02, 0x01, 0x01, I2C_ADDR_SLAVE};
             Wire.write(id, 5);

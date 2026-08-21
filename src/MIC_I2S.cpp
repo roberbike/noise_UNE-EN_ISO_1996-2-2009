@@ -22,6 +22,7 @@
 // DMA buffer of 32-bit frames shared by MIC_I2S_Read()
 static int32_t i2s_raw[MIC_I2S_READ_LEN];
 static float last_peak = 0.0f;
+static uint32_t last_clip_count = 0;
 
 bool MIC_I2S_Init() {
     // Field-by-field assignment (instead of designated initializers) to stay
@@ -71,6 +72,7 @@ size_t MIC_I2S_Read(float *out, size_t max_samples) {
 
     size_t n = bytes_read / sizeof(int32_t);
     float peak = 0.0f;
+    uint32_t clips = 0;
 
     for (size_t i = 0; i < n; i++) {
         // 24-bit signed sample MSB-aligned in the 32-bit slot.
@@ -81,12 +83,18 @@ size_t MIC_I2S_Read(float *out, size_t max_samples) {
 
         float a = fabsf(s);
         if (a > peak) peak = a;
+        if (a > MIC_CLIP_THRESHOLD) clips++;  // #3 clipping detection
     }
 
     last_peak = peak;
+    last_clip_count = clips;
     return n;
 }
 
 float MIC_I2S_LastPeak() {
     return last_peak;
+}
+
+uint32_t MIC_I2S_LastClipCount() {
+    return last_clip_count;
 }
