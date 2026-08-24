@@ -56,7 +56,12 @@ public:
     //            1.0 for I2S, where samples are already full-scale).
     // min_amp: amplitude below which the second is treated as invalid input
     //          (disconnected mic / silence below the real noise floor).
-    void begin(AmplitudeToDb to_db, float amp_scale, float min_amp);
+    // int_scale: multiplies the amplitude before storing the integer `noise`
+    //            field, so it lands in sensible units per node (1.0 = mV for
+    //            ADC; 1e6 = µFS for I2S, whose FS amplitude is ~1e-4 and would
+    //            otherwise round to 0).
+    void begin(AmplitudeToDb to_db, float amp_scale, float min_amp,
+               float int_scale = 1.0f);
 
     // Called from the platform sampling_task once per completed second.
     // Fills out with the current SensorData snapshot and mic_ok flag.
@@ -69,6 +74,7 @@ private:
     AmplitudeToDb to_db_ = nullptr;
     float amp_scale_ = 1.0f;
     float min_amp_ = 0.0f;
+    float int_scale_ = 1.0f;
 
     // Rolling snapshot: invalid seconds keep the last valid values.
     SensorData last_{};

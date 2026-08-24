@@ -18,6 +18,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "DSP_Engine.h"  // SAMPLE_RATE (selects DMA block size below)
 
 /**
  * --- ICS-43434 I2S MEMS microphone capture (XIAO ESP32-S3) ---
@@ -44,7 +45,14 @@
 #endif
 
 #define MIC_I2S_PORT      I2S_NUM_0
-#define MIC_I2S_READ_LEN  512   // frames per i2s_read() block (32 ms @ 16 kHz)
+// Frames per i2s_read() block. The legacy I2S driver caps dma_buf_len at 1024,
+// so 48 kHz uses 768 (16 ms) rather than a naive 1536 that the driver rejects.
+// 16 kHz keeps 512 (32 ms). The ICS-43434 supports up to 51.6 kHz.
+#if SAMPLE_RATE == 48000
+#define MIC_I2S_READ_LEN  768
+#else
+#define MIC_I2S_READ_LEN  512
+#endif
 
 // --- Acoustic characteristics (ICS-43434) ---
 #define MIC_SENSITIVITY_DBFS (-26.0f) // dBFS output at MIC_REF_DB SPL

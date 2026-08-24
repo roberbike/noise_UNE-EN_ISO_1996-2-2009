@@ -12,7 +12,7 @@ El módulo MAX4466 utiliza una cápsula de electreto conectada a un preamplifica
 
 ### 2.2. Digitalización (ESP32-C3 ADC)
 - **Resolución:** 12 bits (4096 niveles). Teóricamente permite ~72dB de rango dinámico. En la práctica, debido a la no linealidad del ADC del ESP32 y el ruido electrónico, el rango dinámico efectivo es de aproximadamente **50-60 dB**.
-- **Frecuencia de Muestreo:** Configurada ahora a **22.05 kHz**. Esto permite cubrir todo el espectro audible legalmente requerido (incluyendo la banda de 8kHz) cumpliendo con el Teorema de Nyquist.
+- **Frecuencia de Muestreo:** Configurada a **16 kHz** (límite superior útil ~8 kHz por Nyquist), suficiente para la banda de interés del ruido urbano, cuya energía se concentra muy por debajo. Nota: para tolerancias de Clase 1 (banda hasta 20 kHz) se requeriría 48 kHz; ver docs/SMART_CITY_CLASE_2.md.
 
 ## 3. Conformidad con el Decreto y Normativa Legal
 
@@ -23,13 +23,13 @@ El Decreto y la norma UNE 1996-2 exigen el uso de instrumentos de **Clase 1** (p
 
 ### 3.2. Ponderación Frecuencial (A-Weighting)
 La normativa exige que los niveles se expresen en $dB(A)$. 
-- **Estado Actual:** **Implementado.** Se utiliza un filtro digital IIR de 6º orden que aplica la curva de ponderación A de forma precisa a los 22.05kHz de muestreo.
+- **Estado Actual:** **Implementado.** Cascada de 3 biquads IIR (6º orden en total) que aplica la curva de ponderación A a la frecuencia de muestreo de 16 kHz. Los coeficientes asumen 16 kHz (ver DSP_Engine.cpp); una validación formal frente a IEC 61672-1 con barrido de tonos queda pendiente.
 
 ### 3.3. Ponderación Temporal (Fast/Slow)
 Las medidas de $L_{max}$ y $L_{min}$ requieren constantes de tiempo normalizadas:
 - **Fast (F):** 125 ms.
 - **Slow (S):** 1 s.
-- **Estado Actual:** **Implementado.** El motor DSP calcula simultáneamente las envolventes temporales Fast ($L_{AFmax}$) y Slow ($L_{ASmax}$) mediante algoritmos de suavizado exponencial (EMA) según IEC 61672.
+- **Estado Actual:** **Fast implementada.** El motor DSP calcula la envolvente temporal Fast ($L_{AFmax}$, 125 ms) mediante suavizado exponencial (EMA) según IEC 61672. La envolvente Slow (1 s) no se reporta actualmente.
 
 ## 4. Cálculos y Medidas Legales Sugeridas
 
@@ -65,6 +65,6 @@ Para garantizar la fiabilidad, se propone el siguiente método utilizando un **s
 6.  **Registro:** Documentar la fecha, temperatura y humedad, ya que afectan a la sensibilidad de la cápsula de electreto.
 
 ## 6. Conclusiones y Recomendaciones
-1.  **Software:** Es crítico implementar la **ponderación A** y aumentar el **muestreo a 22kHz**.
+1.  **Software:** La **ponderación A** está implementada y el muestreo fijado a **16 kHz** (adecuado para monitorización de ruido urbano; 48 kHz sería necesario para aspirar a Clase 1).
 2.  **Legalidad:** El equipo es excelente para **"Smart City Monitoring"** y pre-evaluación, pero los datos no son legalmente vinculantes para sanciones sin un certificado de metrología estatal.
 3.  **Microfonía:** Para mayor precisión profesional, se recomienda sustituir la cápsula de electreto de 50 céntimos por una cápsula de medición MEMS (como la INMP441 o ICS-43434) que tiene respuesta plana y salida digital I2S, eliminando el ruido del ADC interno del ESP32.

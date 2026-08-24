@@ -1,22 +1,21 @@
 /**
- * Firmware de verificación — Nodo XIAO ESP32-S3 + ICS-43434 (I2S)
- * Monitor de ruido (UNE-EN ISO 1996-2, Decreto 213/2012)
+ * Verification firmware — XIAO ESP32-S3 + ICS-43434 node (I2S)
+ * Noise monitor (UNE-EN ISO 1996-2, Decree 213/2012)
  *
- * Ejecuta únicamente la cadena de medida (I2S + ponderación A + RMS) y envía
- * por Serial el nivel RMS (dBFS) y LAeq (dB) cada segundo. No usa I2C.
+ * Runs only the measurement chain (I2S + A-weighting + RMS) and prints the RMS
+ * level (dBFS) and LAeq (dB) every second over Serial. It does not use I2C.
  *
- * A diferencia del MAX4466, el ICS-43434 tiene sensibilidad especificada de
- * fábrica (-26 dBFS @ 94 dB SPL), por lo que el LAeq mostrado ya debería ser
- * correcto (±1 dB típ. de tolerancia del micrófono) sin calibrador.
+ * Unlike the MAX4466, the ICS-43434 has factory-specified sensitivity
+ * (-26 dBFS @ 94 dB SPL), so the displayed LAeq should already be correct
+ * (typically within ±1 dB of the microphone tolerance) without a calibrator.
  *
- * Uso:
- * 1. Conectar ICS-43434: SCK → GPIO2 (D1), WS → GPIO3 (D2), SD → GPIO4 (D3),
+ * Usage:
+ * 1. Connect the ICS-43434: SCK → GPIO2 (D1), WS → GPIO3 (D2), SD → GPIO4 (D3),
  *    VDD 3.3V, GND, L/R → GND.
- * 2. Flashear este firmware, abrir Monitor Serie a 115200 baud.
- * 3. Verificación con calibrador a 94 dB (1 kHz): acoplar el micrófono y
- *    anotar el LAeq estable.
- * 4. Si difiere de 94.0, el ajuste fino es MIC_OFFSET_DB = 94.0 - LAeq_medido,
- *    a definir en build_flags del firmware principal.
+ * 2. Flash this firmware and open the Serial Monitor at 115200 baud.
+ * 3. Verification with a 94 dB calibrator (1 kHz): couple the microphone and note the stable LAeq.
+ * 4. If it differs from 94.0, the fine adjustment is MIC_OFFSET_DB = 94.0 - measured_LAeq,
+ *    to be defined in the main firmware build_flags.
  */
 
 /*
@@ -39,7 +38,7 @@
 #include <freertos/FreeRTOS.h>
 #include "driver/i2s.h"
 
-// --- Configuración (misma que firmware principal) ---
+// --- Configuration (same as the main firmware) ---
 #define MIC_BCLK 2
 #define MIC_WS 3
 #define MIC_DIN 4
@@ -49,7 +48,7 @@
 #define MIC_SENSITIVITY_DBFS (-26.0f) // ICS-43434: -26 dBFS @ 94 dB SPL
 #define MIC_REF_DB 94.0f
 
-// --- Filtro A (ponderación A, 16 kHz) ---
+// --- A-weighting filter (16 kHz) ---
 struct Biquad {
   float b0, b1, b2, a1, a2;
   float z1, z2;
@@ -73,7 +72,7 @@ static float dc_offset = 0.0f;
 void setup() {
   Serial.begin(115200);
   delay(1000);
-  Serial.println("[INIT] Verificacion ICS-43434 (I2S) - XIAO ESP32-S3");
+  Serial.println("[INIT] Verification ICS-43434 (I2S) - XIAO ESP32-S3");
 
   i2s_config_t cfg = {};
   cfg.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX);
@@ -100,13 +99,13 @@ void setup() {
   }
   i2s_zero_dma_buffer(I2S_NUM_0);
 
-  // Descartar arranque del micro y transitorio de filtros (~500 ms)
+  // Discard microphone startup and filter transient (~500 ms)
   uint32_t t0 = millis();
   size_t br;
   while (millis() - t0 < 500) {
     i2s_read(I2S_NUM_0, raw, sizeof(raw), &br, portMAX_DELAY);
   }
-  Serial.println("[INIT] Capturando. LAeq y RMS(dBFS) cada segundo:");
+  Serial.println("[INIT] Capturing. LAeq and RMS(dBFS) every second:");
 }
 
 void loop() {
@@ -141,6 +140,6 @@ void loop() {
     float dbfs = 20.0f * log10f(rms_Z);
     Serial.printf("LAeq: %.1f dB | RMS: %.1f dBFS\n", laeq, dbfs);
   } else {
-    Serial.println("[WARN] Silencio absoluto: revisar linea SD y L/R->GND");
+    Serial.println("[WARN] Absolute silence: check SD line and L/R->GND");
   }
 }

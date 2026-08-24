@@ -20,10 +20,12 @@
 #include "NoiseAggregator.h"
 #include "I2C_Comm.h"
 
-void NoiseAggregator::begin(AmplitudeToDb to_db, float amp_scale, float min_amp) {
+void NoiseAggregator::begin(AmplitudeToDb to_db, float amp_scale, float min_amp,
+                            float int_scale) {
     to_db_ = to_db;
     amp_scale_ = amp_scale;
     min_amp_ = min_amp;
+    int_scale_ = int_scale;
     stat_idx_ = 0;
     last_mday_ = -1;
     memset(&last_, 0, sizeof(last_));
@@ -49,12 +51,16 @@ bool NoiseAggregator::process(const SecondInput &in, SensorData &out, uint8_t &m
         last_.noisePeakDb = lafmax;
         last_.noiseMinDb = laeq;
 
-        // Linear-amplitude fields (mV for ADC, µFS for I2S)
-        last_.noise = (uint32_t)lroundf(rms_amp);
-        last_.noiseAvg = rms_amp;
-        last_.noisePeak = fast_amp;
-        last_.noiseMin = rms_amp;
-        last_.noiseAvgLegalMax = fast_amp;
+        // Linear-amplitude fields, scaled to per-node integer-friendly units:
+        // mV for ADC (int_scale=1), µFS for I2S (int_scale=1e6). Without the
+        // scale the I2S full-scale RMS (~1e-4) rounds the uint32 `noise` to 0.
+        float rms_scaled = rms_amp * int_scale_;
+        float fast_scaled = fast_amp * int_scale_;
+        last_.noise = (uint32_t)lroundf(rms_scaled);
+        last_.noiseAvg = rms_scaled;
+        last_.noisePeak = fast_scaled;
+        last_.noiseMin = rms_scaled;
+        last_.noiseAvgLegalMax = fast_scaled;
         last_.noiseAvgLegalMaxDb = lafmax;
 
         // --- L10/L90 over a full AGG_STAT_SAMPLES-second block ---

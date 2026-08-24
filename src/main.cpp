@@ -88,7 +88,8 @@ void sampling_task(void *pvParameters) {
     float fast_ema_sq = 0.0f;
     float max_fast_sq = 0.0f;
 
-    const float alpha_fast = 0.000500f; // Fast = 125ms
+    // Fast time weighting = 125 ms. alpha = 1/(0.125 s * fs).
+    const float alpha_fast = 1.0f / (0.125f * SAMPLE_RATE);
 
     uint32_t next_sample_time = micros();
 
