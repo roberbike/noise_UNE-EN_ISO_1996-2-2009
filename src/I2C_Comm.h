@@ -26,8 +26,17 @@
 
 // --- I2C Configuration ---
 #define I2C_ADDR_SLAVE 0x08 
-#define I2C_SDA 8
+
+// Default slave pins per target (overridable via build_flags)
+#ifndef I2C_SDA
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+#define I2C_SDA 5   // XIAO ESP32-S3: D4
+#define I2C_SCL 6   // XIAO ESP32-S3: D5
+#else
+#define I2C_SDA 8   // ESP32-C3 (lolin_c3_mini)
 #define I2C_SCL 10
+#endif
+#endif
 
 // Protocol Commands
 #define CMD_GET_STATUS 0x20
@@ -43,6 +52,23 @@
 #define CMD_LEGACY_GET_L90 0x70
 #define CMD_LEGACY_GET_RAW_MV 0x30
 #define CMD_LEGACY_GET_LMAX 0x40
+
+// #12 Node metadata (firmware version, node type, time-sync, clipping)
+#define CMD_GET_METADATA 0x50
+
+#define FW_VERSION_MAJOR 3
+#define FW_VERSION_MINOR 2
+#define FW_VERSION_PATCH 1
+
+// Returned by CMD_GET_METADATA. Packed for a stable wire layout.
+struct NodeMetadata {
+    uint8_t fw_major;
+    uint8_t fw_minor;
+    uint8_t fw_patch;
+    uint8_t node_type;        // 0x01 = ADC/MAX4466, 0x02 = I2S/ICS-43434
+    uint8_t time_synced;      // 1 once the master has set the clock
+    uint16_t clip_count;      // full-scale samples in the last second (I2S)
+} __attribute__((packed));
 
 // --- Secure Queue Payload ---
 // Packed struct to guarantee memory size alignment across FreeRTOS Queues
@@ -63,5 +89,13 @@ void I2C_Comm_Sync();
 
 // Initialization
 void I2C_Comm_Init();
+
+// #12 metadata setters (called by the node firmware)
+void I2C_Comm_SetNodeType(uint8_t node_type);
+void I2C_Comm_SetClipCount(uint16_t clip_count);
+
+// #5 time-sync gate: true once the master has set the clock via
+// CMD_SET_TIME_LEGACY. The aggregator polls this before computing Ld/Le/Ln.
+bool I2C_Comm_TimeSynced();
 
 #endif // I2C_COMM_H

@@ -1,15 +1,15 @@
 /**
- * Firmware de calibración — Monitor de ruido (UNE-EN ISO 1996-2, Decreto 213/2012)
+ * Calibration firmware — Noise monitor (UNE-EN ISO 1996-2, Decree 213/2012)
  *
- * Ejecuta únicamente la cadena de medida (ADC + ponderación A + RMS) y envía
- * por Serial el valor RMS (mV) y LAeq (dB) cada segundo. No usa I2C.
+ * Runs only the measurement chain (ADC + A-weighting + RMS) and prints the RMS
+ * value (mV) and LAeq (dB) every second over Serial. It does not use I2C.
  *
- * Uso:
- * 1. Conectar MAX4466 OUT → GPIO 4, VCC 3.3V, GND.
- * 2. Ajustar potenciómetro del MAX4466 según docs/CALIBRACION.md.
- * 3. Flashear este firmware, abrir Monitor Serie a 115200 baud.
- * 4. Con calibrador a 94 dB (1 kHz), acoplar el micrófono y anotar RMS (mV) estable.
- * 5. Ese valor es CALIBRATION_RMS_MV en src/main.cpp del firmware principal.
+ * Usage:
+ * 1. Connect MAX4466 OUT → GPIO 4, VCC 3.3V, GND.
+ * 2. Adjust the MAX4466 potentiometer according to docs/CALIBRACION.md.
+ * 3. Flash this firmware, open the Serial Monitor at 115200 baud.
+ * 4. With a 94 dB calibrator (1 kHz), couple the microphone and note the stable RMS (mV).
+ * 5. That value becomes CALIBRATION_RMS_MV in src/main.cpp of the main firmware.
  */
 
 /*
@@ -32,18 +32,18 @@
 #include <Arduino.h>
 #include <math.h>
 
-// --- Configuración (misma que firmware principal) ---
-#define ADC_CHANNEL ADC1_CHANNEL_4  // GPIO 4 — salida MAX4466
+// --- Configuration (same as the main firmware) ---
+#define ADC_CHANNEL ADC1_CHANNEL_4  // GPIO 4 — MAX4466 output
 #define SAMPLE_RATE 16000
 #define SAMPLE_PERIOD_US (1000000 / SAMPLE_RATE)
 #define REF_VOLTAGE 1100
 
-// Constantes de calibración. Con el calibrador a 94 dB, ajustar CALIBRATION_RMS_MV
-// al valor de RMS (mV) que se muestre estable; así LAeq mostrará ~94 dB.
+// Calibration constants. With the 94 dB calibrator, set CALIBRATION_RMS_MV to
+// the stable RMS value (mV) that is displayed; this makes LAeq read about 94 dB.
 #define CALIBRATION_DB 94.0f
-#define CALIBRATION_RMS_MV 166.0f  // Sustituir por el valor medido en el paso 4
+#define CALIBRATION_RMS_MV 166.0f  // Replace with the measured value from step 4
 
-// --- Filtro A (ponderación A, 16 kHz) ---
+// --- A-weighting filter (16 kHz) ---
 struct Biquad {
   float b0, b1, b2, a1, a2;
   float z1, z2;
@@ -69,18 +69,18 @@ void setup() {
 
   Serial.println();
   Serial.println("========================================");
-  Serial.println("  CALIBRACION - Monitor de ruido");
-  Serial.println("  ISO 1996-2 / Decreto 213/2012");
+  Serial.println("  CALIBRATION - Noise monitor");
+  Serial.println("  ISO 1996-2 / Decree 213/2012");
   Serial.println("========================================");
   Serial.println();
-  Serial.println("Entrada: GPIO 4 (MAX4466 OUT)");
-  Serial.println("Salida: RMS (mV) y LAeq (dB) cada 1 s");
+  Serial.println("Input: GPIO 4 (MAX4466 OUT)");
+  Serial.println("Output: RMS (mV) and LAeq (dB) every 1 s");
   Serial.println();
-  Serial.println("Pasos:");
-  Serial.println("  1. Calibrador 94 dB @ 1 kHz, micrófono acoplado.");
-  Serial.println("  2. Anotar el valor estable de RMS (mV).");
-  Serial.println("  3. Copiar ese valor a CALIBRATION_RMS_MV en src/main.cpp");
-  Serial.println("     del firmware principal.");
+  Serial.println("Steps:");
+  Serial.println("  1. 94 dB calibrator @ 1 kHz, microphone coupled.");
+  Serial.println("  2. Record the stable RMS (mV) value.");
+  Serial.println("  3. Copy that value to CALIBRATION_RMS_MV in src/main.cpp");
+  Serial.println("     of the main firmware.");
   Serial.println();
   Serial.println("----------------------------------------");
 
@@ -107,11 +107,11 @@ void loop() {
   float dc_offset = 2048.0f;
 #endif
 
-  unsigned long next_sample = micros();
-  const unsigned long deadline = next_sample + 1000000UL;  // 1 s
+  uint32_t next_sample = micros();
+  const uint32_t start = next_sample;
 
-    while (micros() < deadline) {
-      if (micros() >= next_sample) {
+    while ((int32_t)(micros() - start) < 1000000L) {  // 1 s, wrap-safe
+      if ((int32_t)(micros() - next_sample) >= 0) {
         next_sample += SAMPLE_PERIOD_US;
 
         uint32_t raw = adc1_get_raw(ADC_CHANNEL);
@@ -125,8 +125,8 @@ void loop() {
         sum_sq_A += (double)(filtered * filtered);
         samples_count++;
       } else {
-          unsigned long now = micros();
-          if (next_sample - now > 2000) {
+          int32_t remaining = (int32_t)(next_sample - micros());
+          if (remaining > 2000) {
               vTaskDelay(pdMS_TO_TICKS(1));
           } else {
               taskYIELD();
@@ -136,17 +136,24 @@ void loop() {
 
   if (samples_count > 0) {
     float mean_sq = (float)(sum_sq_A / (double)samples_count);
-    uint32_t voltage_rms_mv =
-        esp_adc_cal_raw_to_voltage((uint32_t)sqrtf(mean_sq), &adc_chars);
+    // Slope-only float conversion (same as the fixed main firmware): no
+    // integer truncation and no calibration intercept on an AC amplitude.
+    static float mv_per_count = 0.0f;
+    if (mv_per_count == 0.0f) {
+      mv_per_count = (float)(esp_adc_cal_raw_to_voltage(3000, &adc_chars) -
+                             esp_adc_cal_raw_to_voltage(1000, &adc_chars)) / 2000.0f;
+      Serial.printf("[INIT] ADC slope: %.4f mV/count\n", mv_per_count);
+    }
+    float voltage_rms_mv = sqrtf(mean_sq) * mv_per_count;
 
     float laeq = 0.0f;
-    if (voltage_rms_mv > 0 && CALIBRATION_RMS_MV > 0.0f) {
-      laeq = 20.0f * log10((float)voltage_rms_mv / CALIBRATION_RMS_MV) +
+    if (voltage_rms_mv > 0.05f && CALIBRATION_RMS_MV > 0.0f) {
+      laeq = 20.0f * log10(voltage_rms_mv / CALIBRATION_RMS_MV) +
              CALIBRATION_DB;
     }
 
-    Serial.printf("RMS: %lu mV  |  LAeq: %.1f dB(A)  (ref %.1f dB @ %.1f mV)\n",
-                  (unsigned long)voltage_rms_mv, laeq, CALIBRATION_DB,
+    Serial.printf("RMS: %.2f mV  |  LAeq: %.1f dB(A)  (ref %.1f dB @ %.1f mV)\n",
+                  voltage_rms_mv, laeq, CALIBRATION_DB,
                   CALIBRATION_RMS_MV);
   }
 }

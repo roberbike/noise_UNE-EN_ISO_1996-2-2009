@@ -17,9 +17,9 @@
 #include <Wire.h>
 
 /**
- * Master Device: XIAO ESP32-S3 / Lolin S2 Mini
- * Function: Requests full SensorData from ESP32-C3 slave over I2C.
- * Slave Address: 0x08
+ * Master device: XIAO ESP32-S3 / Lolin S2 Mini
+ * Function: requests the full SensorData from the ESP32-C3 slave over I2C.
+ * Slave address: 0x08
  */
 
 #define SLAVE_ADDR 0x08
@@ -36,10 +36,11 @@
 #define I2C_SCL 6
 #endif
 
-// Protocol commands (sync with slave firmware)
+// Protocol commands (keep in sync with the slave firmware)
 #define CMD_GET_STATUS 0x20
 #define CMD_GET_STATUS_LEGACY 0x00
 #define CMD_GET_DATA 0x01
+#define CMD_GET_METADATA 0x50
 
 struct SensorData {
   uint32_t noise;
@@ -66,7 +67,7 @@ void setup() {
   delay(2000);
   Serial.println("--- Master - Sensor Compat Test ---");
   Wire.begin(I2C_SDA, I2C_SCL);
-  Wire.setTimeOut(100); // 100ms hardware timeout to prevent master-side lockups 
+  Wire.setTimeOut(100); // 100 ms hardware timeout to prevent master-side lockups
   Serial.printf("I2C Initialized (SDA=%d, SCL=%d). Polling Slave 0x%02X...\n",
                 I2C_SDA, I2C_SCL, SLAVE_ADDR);
 }
@@ -119,16 +120,52 @@ void loop() {
         p[i] = Wire.read();
       }
 
+      // --- Triple freshness validation (see docs/COMUNICACION.md) ---
+      // Complete read alone is NOT enough: the ESP32 I2C slave HAL may pad a
+      // short reply to full length. Require status==1 AND cycles advancing;
+      // otherwise the node is stalled/booting and the struct is stale.
+      static uint32_t last_cycles = 0;
+      static bool have_last = false;
+      bool fresh = (data.cycles != last_cycles) || !have_last;
+      bool publishable = (status == 1) && fresh;
+      last_cycles = data.cycles;
+      have_last = true;
+
       Serial.println("--- Sensor Data ---");
-      Serial.printf("Status: %s\n", (status == 1 ? "MIC OK" : "MIC ERROR"));
+      Serial.printf("Status: %s | %s\n",
+                    (status == 1 ? "MIC OK" : "MIC ERROR"),
+                    (publishable ? "PUBLISH" : "SKIP (stale/not ready)"));
       Serial.printf("LAeq (1s): %.2f dB\n", data.noiseAvgDb);
       Serial.printf("Lmax (1s): %.2f dB\n", data.noisePeakDb);
       Serial.printf("L10 (Legal): %.2f dB\n", data.noiseAvgLegalDb);
       Serial.printf("L90 (Backg): %u\n", data.lowNoiseLevel);
       Serial.printf("Lden (24h): %.2f dB\n", data.noiseLden);
-      Serial.printf("Raw Voltage: %u mV\n", data.noise);
+      Serial.printf("Raw: %u\n", data.noise);
       Serial.printf("Cycles: %u\n", data.cycles);
       Serial.println("-------------------");
+
+      // Only forward to the cloud/InfluxDB when publishable. A stalled node
+      // (frozen cycles) or a not-ready node (status 0) is skipped, never
+      // republished — this is what prevents the flat lines in Grafana.
+      if (publishable) {
+        // publishToCloud(data);   // integrate here
+      }
+
+      // #12: optional metadata read (fw version, node type, time-sync, clips)
+      Wire.beginTransmission(SLAVE_ADDR);
+      Wire.write(CMD_GET_METADATA);
+      if (Wire.endTransmission() == 0) {
+        delay(5);
+        if (Wire.requestFrom((uint16_t)SLAVE_ADDR, (size_t)7) == 7) {
+          uint8_t m[7];
+          for (int i = 0; i < 7; i++) m[i] = Wire.read();
+          uint16_t clips = (uint16_t)m[5] | ((uint16_t)m[6] << 8);
+          Serial.printf("Meta: fw %u.%u.%u | node=%s | time_synced=%u | clips=%u\n",
+                        m[0], m[1], m[2],
+                        (m[3] == 0x02 ? "I2S" : (m[3] == 0x01 ? "ADC" : "?")),
+                        m[4], clips);
+        }
+      }
     } else {
       Serial.printf("Error: Incomplete Data. Expected %u, got %d\n",
                     (unsigned int)sizeToRead, Wire.available());

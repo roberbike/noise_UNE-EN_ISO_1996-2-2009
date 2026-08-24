@@ -15,12 +15,27 @@
 
 #include "DSP_Engine.h"
 
-// A-Weighting Filter (Cascaded Biquads for 16000 Hz)
+// --- A-Weighting Filter: cascade of 3 biquads (6th order, IEC 61672-1) ---
+// Coefficients are computed by bilinear transform of the analog A-weighting
+// prototype and normalized to 0 dB @ 1 kHz. One set per supported sample rate
+// (see tools/gen_a_weight.py to regenerate/verify). Struct layout is
+// {b0,b1,b2,a1,a2} with the DF2T convention of DSP_ApplyFilter (a1,a2 are
+// subtracted).
+#if SAMPLE_RATE == 48000
+// 48 kHz. Verified vs IEC 61672-1 nominal values: |err| < 0.6 dB up to 8 kHz.
+Biquad aWeightingFilters[3] = {
+    {0.23418304f, 0.46836609f, 0.23418304f, -0.22455846f, 0.01260663f, 0, 0},
+    {1.00000000f, -2.00000000f, 1.00000000f, -1.89387049f, 0.89515977f, 0, 0},
+    {1.00000000f, -2.00000000f, 1.00000000f, -1.99461446f, 0.99462171f, 0, 0}
+};
+#else
+// 16 kHz (default). Nyquist at 8 kHz; matches the original coefficient set.
 Biquad aWeightingFilters[3] = {
     {0.529093f, -1.058186f, 0.529093f, -1.983887f, 0.983952f, 0, 0},
     {1.000000f, -2.000000f, 1.000000f, -1.705510f, 0.715988f, 0, 0},
     {1.000000f, 2.000000f, 1.000000f, 0.821564f, 0.168742f, 0, 0}
 };
+#endif
 
 void DSP_Init() {
     // Basic init if needed
