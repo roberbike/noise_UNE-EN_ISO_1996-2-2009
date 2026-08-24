@@ -58,7 +58,7 @@
 
 #define FW_VERSION_MAJOR 3
 #define FW_VERSION_MINOR 2
-#define FW_VERSION_PATCH 0
+#define FW_VERSION_PATCH 1
 
 // Returned by CMD_GET_METADATA. Packed for a stable wire layout.
 struct NodeMetadata {

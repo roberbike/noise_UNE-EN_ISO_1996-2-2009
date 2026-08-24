@@ -17,9 +17,9 @@
 #include <Wire.h>
 
 /**
- * Master Device: XIAO ESP32-S3 / Lolin S2 Mini
- * Function: Requests full SensorData from ESP32-C3 slave over I2C.
- * Slave Address: 0x08
+ * Master device: XIAO ESP32-S3 / Lolin S2 Mini
+ * Function: requests the full SensorData from the ESP32-C3 slave over I2C.
+ * Slave address: 0x08
  */
 
 #define SLAVE_ADDR 0x08
@@ -36,7 +36,7 @@
 #define I2C_SCL 6
 #endif
 
-// Protocol commands (sync with slave firmware)
+// Protocol commands (keep in sync with the slave firmware)
 #define CMD_GET_STATUS 0x20
 #define CMD_GET_STATUS_LEGACY 0x00
 #define CMD_GET_DATA 0x01
@@ -67,7 +67,7 @@ void setup() {
   delay(2000);
   Serial.println("--- Master - Sensor Compat Test ---");
   Wire.begin(I2C_SDA, I2C_SCL);
-  Wire.setTimeOut(100); // 100ms hardware timeout to prevent master-side lockups 
+  Wire.setTimeOut(100); // 100 ms hardware timeout to prevent master-side lockups
   Serial.printf("I2C Initialized (SDA=%d, SCL=%d). Polling Slave 0x%02X...\n",
                 I2C_SDA, I2C_SCL, SLAVE_ADDR);
 }

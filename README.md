@@ -258,6 +258,67 @@ Dirección de esclavo: `0x08`. Comandos (1 byte):
 
 ## Compilar y flashear (PlatformIO)
 
+---
+
+## English version
+
+# Environmental Noise Monitor — UNE-EN ISO 1996-2
+
+A distributed network of environmental noise measurement nodes with I2C output. The system supports two interchangeable sensor node variants that share the same signal-processing chain (A-weighting, ISO 1996-2 indicators) and the same I2C protocol, so the master node treats them as identical:
+
+- Analog node — ESP32-C3 + **MAX4466** electret microphone (analog + ADC)
+- Digital node — XIAO ESP32-S3 + **ICS-43434** MEMS I2S microphone (recommended)
+
+A **master** node (ESP32-S2/S3, typically integrated with CanAirIO) reads the indicators over I2C and publishes them (InfluxDB/Grafana, MQTT, etc.).
+
+> Regulatory note (summary): this device is a monitoring and prevention instrument for noise maps and trend detection. It is not a certified Class 1/2 sound level meter (IEC 61672-1), and the data are not legally binding for sanctions without official metrological verification. See the normative section below.
+
+## System architecture
+
+Each sensor node is an I2C slave (address `0x08`) that samples the microphone, calculates acoustic indicators once per second, and keeps them in a cache that the master reads on demand. The code is organized as follows:
+
+- `src/NoiseAggregator.{h,cpp}` — all ISO 1996-2 math, shared by both node types
+- `src/main.cpp` — ADC node (ESP32-C3 + MAX4466): polling-based sampling at 16 kHz
+- `src/main_i2s.cpp` — I2S node (XIAO ESP32-S3 + ICS-43434): DMA sampling
+- `src/MIC_I2S.{h,cpp}` — digital I2S microphone driver
+- `src/DSP_Engine.{h,cpp}` — A-weighting filters (biquads at 16 kHz) and shared types
+- `src/I2C_Comm.{h,cpp}` — I2C slave protocol, status contract and metadata
+- `examples/` — master firmware and calibration/verification firmware
+
+The only platform-specific code is the sampling task (ADC vs I2S) and the amplitude-to-SPL conversion, which each node injects into the common aggregator. A change in acoustic logic is implemented in one place only.
+
+## Why the two boards
+
+The digital node must process audio in floating point continuously, which the S3 handles well thanks to the FPU and dual-core architecture. The C3 has no hardware FPU and must emulate the chain in software, which is why it is reserved for the lighter analog ADC input path.
+
+## Practical difference between microphones
+
+The MAX4466 cannot measure below approximately 58–60 dB, while the ICS-43434 lowers the floor to around 34 dB, enabling real urban night measurements. This is why the digital MEMS microphone is the recommended option.
+
+## Meaning of the measurements
+
+All levels are expressed in **dB(A)**. The firmware calculates:
+
+- **LAeq,1s** — equivalent continuous level in 1 second
+- **LAFmax** — maximum level with Fast weighting in the interval
+- **L10 / L90** — percentile-based noise characterization
+- **Ld / Le / Ln** — day/evening/night energy averages
+- **Lden** — day-evening-night global index with the standard penalty factors
+
+The details and formulas are documented in the Spanish sections above, while the code and the example firmware implement the same behavior for both node types.
+
+## Build and flash (PlatformIO)
+
+Use PlatformIO with the project environment matching the target board:
+
+- `lolin_c3_mini` for the analog node
+- `seeed_xiao_esp32s3` for the digital node
+
+Then build and upload the firmware to the selected board. The project already includes the needed configuration and compile flags in [platformio.ini](platformio.ini).
+
+---
+
+
 **Nodo analógico** (ESP32-C3 + MAX4466): entorno `lolin_c3_mini`.
 
 **Nodo digital** (XIAO ESP32-S3 + ICS-43434): entorno `seeed_xiao_esp32s3`.

@@ -45,11 +45,11 @@
 #endif
 
 #define MIC_I2S_PORT      I2S_NUM_0
-// Frames per i2s_read() block. Kept at ~32 ms of audio regardless of rate:
-// 512 @ 16 kHz, 1536 @ 48 kHz. The ICS-43434 supports up to 51.6 kHz in its
-// high-performance mode, so 48 kHz is within spec.
+// Frames per i2s_read() block. The legacy I2S driver caps dma_buf_len at 1024,
+// so 48 kHz uses 768 (16 ms) rather than a naive 1536 that the driver rejects.
+// 16 kHz keeps 512 (32 ms). The ICS-43434 supports up to 51.6 kHz.
 #if SAMPLE_RATE == 48000
-#define MIC_I2S_READ_LEN  1536
+#define MIC_I2S_READ_LEN  768
 #else
 #define MIC_I2S_READ_LEN  512
 #endif

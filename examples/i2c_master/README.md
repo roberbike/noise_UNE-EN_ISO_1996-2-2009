@@ -60,3 +60,50 @@ de sondeo; si necesitas el promedio del intervalo, acumúlalo en el maestro.
 - Valores planos en el dashboard con el nodo respondiendo: revisa que aplicas la
   validación por `cycles`; si `cycles` no avanza, el muestreo del nodo está
   colgado (la v3.1.2+ lo reporta con status 0 y el watchdog lo reinicia).
+
+---
+
+## English version
+
+# Example: I2C master (ESP32-S2 / ESP32-S3)
+
+Reference I2C master that reads noise indicators from a sensor node (slave at `0x08`) and shows how to integrate it properly. It works the same for the analog node (ESP32-C3 + MAX4466) and the digital node (XIAO ESP32-S3 + ICS-43434): the protocol is identical.
+
+## Pin mapping
+
+| Master board | SDA | SCL |
+| :--- | :--- | :--- |
+| XIAO ESP32-S3 | GPIO 5 | GPIO 6 |
+| Lolin S2 Mini | GPIO 8 | GPIO 9 |
+
+Slave side: ESP32-C3 → SDA GPIO 8 / SCL GPIO 10; XIAO ESP32-S3 → SDA GPIO 5 / SCL GPIO 6. **Common ground between both boards is mandatory.** 4.7 kΩ pull-ups to 3.3 V on SDA/SCL are needed only if the boards do not include them and the bus hangs.
+
+## Read flow (the correct pattern)
+
+1. Send `GET_STATUS` (`0x20`) and read 1 byte.
+2. If `status == 1`, send `GET_DATA` (`0x01`) and read `sizeof(SensorData)` bytes.
+3. **Triple validation before publishing** (all three are required):
+   - Full read (`sizeof(SensorData)` bytes received)
+   - `status == 1`
+   - `cycles` greater than the previous read
+4. Optional: `GET_METADATA` (`0x50`) → 7 bytes with firmware version, node type (0x01 ADC / 0x02 I2S), `time_synced`, and last-second `clip_count`.
+
+**Why the triple validation.** A full read alone is not enough: the ESP32 I2C slave HAL can pad a short reply to the full length. A stalled slave can also return a valid but frozen structure; only the advance of `cycles` detects that. Without this check, a stuck node can generate flat but believable lines in the dashboard.
+
+## What is read
+
+The master prints LAeq, LAFmax, L10, L90, Lden and `cycles`. The meaning of each indicator is described in the main README under "What the measurements mean".
+
+## Example behavior
+
+- Initializes I2C with the board pins
+- Polls slave `0x08` every 5 seconds
+- Sends `GET_STATUS` (`0x20`) with legacy fallback (`0x00`)
+- Sends `GET_DATA` (`0x01`), applies the triple validation, and only forwards publishable samples to the cloud
+- Reads and displays node metadata
+
+## Diagnosis
+
+- `I2C Connection Error: 2`: slave does not ACK, usually due to wiring, power or common ground
+- Device detected but no data: command mismatch or `SensorData` layout mismatch between master and slave (must be compiled from the same version)
+- Flat values in the dashboard while the node responds: verify that you are checking `cycles`; if `cycles` does not move, the node sampling is stuck and should be marked as not valid

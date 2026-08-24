@@ -40,7 +40,13 @@ bool MIC_I2S_Init() {
     cfg.tx_desc_auto_clear = false;
     cfg.fixed_mclk = 0;
 
-    if (i2s_driver_install(MIC_I2S_PORT, &cfg, 0, NULL) != ESP_OK) {
+    esp_err_t inst = i2s_driver_install(MIC_I2S_PORT, &cfg, 0, NULL);
+    if (inst != ESP_OK) {
+        // Surface the concrete reason (e.g. ESP_ERR_INVALID_ARG when
+        // dma_buf_len exceeds the legacy driver's 1024 cap) instead of a bare
+        // false, so a bad sample-rate/buffer combo is diagnosable from serial.
+        Serial.printf("[ERR] i2s_driver_install failed: 0x%x (rate=%d, dma_buf_len=%d)\n",
+                      inst, SAMPLE_RATE, MIC_I2S_READ_LEN);
         return false;
     }
 

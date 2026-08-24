@@ -39,3 +39,38 @@ desviación mayor indica no linealidad del ADC o saturación del previo.
 Procedimiento detallado, conexión del MAX4466, ajuste del potenciómetro y
 normativa (UNE-EN ISO 1996-2:2009, Decreto 213/2012):
 **[docs/CALIBRACION.md](../../docs/CALIBRACION.md)**.
+
+---
+
+## English version
+
+# Example: calibration of the MAX4466 node (ADC)
+
+Standalone firmware for the analog node (ESP32-C3 + MAX4466). It runs the same measurement chain as the main firmware (ADC → A-weighting → RMS) and outputs via **Serial** every second without using I2C:
+
+- **RMS (mV)** — RMS voltage at the ADC input (MAX4466 output)
+- **LAeq (dB)** — equivalent level in dB(A) using the calibration constants
+
+This microphone **requires acoustic calibration**: its sensitivity depends on the gain adjustment of the potentiometer and is not specified by the factory (unlike the ICS-43434 used by the digital node).
+
+## Usage
+
+1. Connect the **MAX4466**: OUT → GPIO 4, VCC → 3.3 V, GND → GND.
+2. Adjust the **potentiometer** of the MAX4466 with a calibrator at 94 dB until a stable RMS of ~100–400 mV is obtained without saturation.
+3. In PlatformIO: use the **lolin_c3_mini** environment, compile and upload.
+4. Open the **Serial Monitor** at **115200** baud.
+5. With the **94 dB calibrator** (1 kHz) and the microphone properly coupled, note the stable **RMS (mV)** value.
+6. Copy that value into **`CALIBRATION_RMS_MV`** in **`src/main.cpp`** (project root), rebuild and flash the production firmware.
+
+## Expected result
+
+Noise floor of the node: **~58–60 dB** (limited by the ESP32 ADC and the MAX4466 preamp). This is why this microphone cannot measure quiet urban nights — that is the role of the ICS-43434 node, with a floor around 34 dB.
+
+## Linearity check (optional)
+
+Change the calibrator to 114 dB: the system should read 114.0 ± 0.5 dB. A larger deviation indicates ADC nonlinearity or preamp saturation.
+
+## Full documentation
+
+Detailed procedure, MAX4466 wiring, potentiometer adjustment and regulations (UNE-EN ISO 1996-2:2009, Decree 213/2012):
+**[docs/CALIBRACION.md](../../docs/CALIBRACION.md)**.

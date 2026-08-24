@@ -14,6 +14,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   L10, L90, Ld/Le/Ln, Lden) y el encuadre normativo UNE-EN ISO 1996-2 /
   IEC 61672-1 (dónde queda el sistema respecto a Clase 1/2 y para qué es o no
   legalmente válido). Índice navegable.
+- **Rama experimental 48 kHz** para el nodo I2S: `seeed_xiao_esp32s3` pasa a
+  `SAMPLE_RATE=48000`, se recalculan los coeficientes A y se ajusta el bloque
+  DMA para mantener ~32 ms sin perder estabilidad; la documentación queda en
+  `docs/RAMA_48KHZ.md` y el cambio queda aislado en el entorno S3.
 - READMEs de ejemplos rehechos: `i2c_master` documenta la validación triple y
   los metadatos; `calibration` (ADC) y `calibration_i2s` (I2S) explican el
   suelo de ruido esperado de cada micrófono y remiten al significado de las
