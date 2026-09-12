@@ -16,6 +16,7 @@
 #include <Arduino.h>
 #include <string.h>
 #include <math.h>
+#include <algorithm>
 #include "time.h"
 #include "NoiseAggregator.h"
 #include "I2C_Comm.h"
@@ -26,7 +27,8 @@ void NoiseAggregator::begin(AmplitudeToDb to_db, float amp_scale, float min_amp,
     amp_scale_ = amp_scale;
     min_amp_ = min_amp;
     int_scale_ = int_scale;
-    stat_idx_ = 0;
+    win_head_ = 0;
+    win_count_ = 0;
     last_mday_ = -1;
     memset(&last_, 0, sizeof(last_));
     day_.reset();
@@ -47,9 +49,22 @@ bool NoiseAggregator::process(const SecondInput &in, SensorData &out, uint8_t &m
         float laeq = to_db_(rms_amp);
         float lafmax = to_db_(fast_amp);
 
+        // LASmax: max level with Slow (1 s) time weighting. Same amplitude->dB
+        // path as LAeq/LAFmax; the slow envelope is an RMS-like amplitude.
+        float slow_amp = sqrtf(in.max_slow_sq) * amp_scale_;
+        float lasmax = (slow_amp > 0.0f) ? to_db_(slow_amp) : laeq;
+
+        // LCpeak: absolute C-weighted instantaneous peak (no time weighting).
+        // The peak is a bare amplitude, not an RMS; to_db_ expects the same
+        // amplitude scale as the RMS path, so peak_c (C-weighted |sample| max)
+        // goes straight through it. This is the impulsive-noise indicator.
+        float lcpeak = (in.peak_c > 0.0f) ? to_db_(in.peak_c * amp_scale_) : laeq;
+
         last_.noiseAvgDb = laeq;
         last_.noisePeakDb = lafmax;
         last_.noiseMinDb = laeq;
+        last_.noiseLASmaxDb = lasmax;
+        last_.noiseLCpeakDb = lcpeak;
 
         // Linear-amplitude fields, scaled to per-node integer-friendly units:
         // mV for ADC (int_scale=1), µFS for I2S (int_scale=1e6). Without the
@@ -63,29 +78,36 @@ bool NoiseAggregator::process(const SecondInput &in, SensorData &out, uint8_t &m
         last_.noiseAvgLegalMax = fast_scaled;
         last_.noiseAvgLegalMaxDb = lafmax;
 
-        // --- L10/L90 over a full AGG_STAT_SAMPLES-second block ---
-        if (stat_idx_ < AGG_STAT_SAMPLES) {
-            stat_buffer_[stat_idx_++] = laeq;
-        }
-        if (stat_idx_ >= AGG_STAT_SAMPLES) {
-            float tmp[AGG_STAT_SAMPLES];
-            memcpy(tmp, stat_buffer_, sizeof(tmp));
-            // Descending selection sort (small fixed N)
-            for (int k = 0; k < AGG_STAT_SAMPLES - 1; k++) {
-                for (int j = k + 1; j < AGG_STAT_SAMPLES; j++) {
-                    if (tmp[k] < tmp[j]) {
-                        float t = tmp[k]; tmp[k] = tmp[j]; tmp[j] = t;
-                    }
-                }
-            }
-            float l10 = tmp[AGG_STAT_SAMPLES / 10];
-            float l90 = tmp[AGG_STAT_SAMPLES * 9 / 10];
+        // --- L10/L90 over a sliding window of the last AGG_WINDOW_SEC s ---
+        // Insert this second's LAeq into the circular buffer, then recompute
+        // the percentiles over the whole window every second. The master thus
+        // always reads the percentiles for the last AGG_WINDOW_SEC seconds up
+        // to its read, with no per-block "staircase". nth_element is O(N), so
+        // this stays cheap even for 300-600 s windows.
+        win_buffer_[win_head_] = laeq;
+        win_head_ = (win_head_ + 1) % AGG_WINDOW_SEC;
+        if (win_count_ < AGG_WINDOW_SEC) win_count_++;
+
+        {
+            // Copy the valid part of the window and select the percentile ranks.
+            static float tmp[AGG_WINDOW_SEC];
+            memcpy(tmp, win_buffer_, win_count_ * sizeof(float));
+
+            // L10 = level exceeded 10% of the time = 90th percentile by value.
+            // L90 = level exceeded 90% of the time = 10th percentile by value.
+            int idx_l10 = (int)(win_count_ * 0.90f);
+            int idx_l90 = (int)(win_count_ * 0.10f);
+            if (idx_l10 >= win_count_) idx_l10 = win_count_ - 1;
+
+            std::nth_element(tmp, tmp + idx_l90, tmp + win_count_);
+            float l90 = tmp[idx_l90];
+            std::nth_element(tmp, tmp + idx_l10, tmp + win_count_);
+            float l10 = tmp[idx_l10];
+
             last_.noiseAvgLegal = l10;
             last_.noiseAvgLegalDb = l10;
-            // L90 stored as uint16_t; clamp to valid range (SPL is never
-            // negative, but guard the cast against a spurious sub-zero value).
+            // L90 stored as uint16_t; guard the cast against a spurious sub-zero.
             last_.lowNoiseLevel = (l90 > 0.0f) ? (uint16_t)(l90 + 0.5f) : 0;
-            stat_idx_ = 0;
         }
 
         // --- Period indicators (only with a synced clock, #5) ---

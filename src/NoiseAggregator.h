@@ -35,8 +35,16 @@
  * function pointer (ADC: slope in mV + calibration; I2S: dBFS + sensitivity).
  */
 
-// Number of 1-second LAeq values per L10/L90 percentile block.
-#define AGG_STAT_SAMPLES 20
+// L10/L90 sliding-window length in seconds (one LAeq sample per second).
+// ISO 1996-2 short-term reference intervals for urban noise are typically
+// 5 min; override via build_flags (-D AGG_WINDOW_SEC=600). The window slides
+// every second so the master reads the percentiles over the last
+// AGG_WINDOW_SEC seconds up to the read, regardless of its polling period.
+#ifndef AGG_WINDOW_SEC
+#define AGG_WINDOW_SEC 300
+#endif
+static_assert(AGG_WINDOW_SEC >= 10 && AGG_WINDOW_SEC <= 3600,
+              "AGG_WINDOW_SEC must be between 10 and 3600 seconds");
 
 // Convert a linear RMS amplitude (mV for ADC, full-scale for I2S) to dB SPL.
 typedef float (*AmplitudeToDb)(float amplitude);
@@ -44,6 +52,8 @@ typedef float (*AmplitudeToDb)(float amplitude);
 struct SecondInput {
     float mean_sq;       // mean of squared A-weighted samples over the second
     float max_fast_sq;   // max of the 125 ms fast EMA of squared samples
+    float max_slow_sq;   // max of the 1 s slow EMA of squared samples (LASmax)
+    float peak_c;        // max |C-weighted sample| in the second (LCpeak)
     uint32_t samples;    // sample count actually accumulated this second
     bool input_valid;    // false if the raw input was dead/clipped this second
     uint32_t clip_count; // samples that hit full scale this second (I2S)
@@ -79,9 +89,12 @@ private:
     // Rolling snapshot: invalid seconds keep the last valid values.
     SensorData last_{};
 
-    // L10/L90 block buffer
-    float stat_buffer_[AGG_STAT_SAMPLES];
-    int stat_idx_ = 0;
+    // L10/L90 sliding window: circular buffer of the last AGG_WINDOW_SEC
+    // one-second LAeq values. head_ is the next write slot; count_ grows to
+    // AGG_WINDOW_SEC and then stays full (oldest sample overwritten each sec).
+    float win_buffer_[AGG_WINDOW_SEC];
+    int win_head_ = 0;
+    int win_count_ = 0;
 
     // Period accumulators
     PeriodStats day_{};

@@ -16,10 +16,19 @@
 #include "I2C_Comm.h"
 #include <sys/time.h>
 #include <freertos/queue.h>
+#include <Preferences.h>
 
 QueueHandle_t dataQueue = NULL;
 SensorData cachedSensorData = {0};
 uint8_t cachedMicOk = 0;
+
+// NVS-backed calibration offset (dB). Loaded at init, updated by CMD_SET_CALIB.
+static Preferences prefs;
+static volatile float calib_offset_db = 0.0f;
+
+float I2C_Comm_GetCalibOffset() {
+    return calib_offset_db;
+}
 
 // Guards cachedSensorData/cachedMicOk: I2C_Comm_Sync (task context) copies the
 // struct while requestEvent (slave HAL context) reads it. Without the lock a
@@ -82,6 +91,20 @@ void receiveEvent(int bytes) {
         meta_time_synced = 1; // #5: enable Ld/Le/Ln computation
     }
 
+    // Persistent calibration: 0x0A + int16 LE (hundredths of dB).
+    // Writing NVS from the I2C callback is acceptable here — it happens only on
+    // an explicit, rare calibration command, not in the hot path.
+    if (cmd == CMD_SET_CALIB && bytes == 3) {
+        int16_t raw = 0;
+        uint8_t *p = (uint8_t *)&raw;
+        if (Wire.available()) p[0] = Wire.read();
+        if (Wire.available()) p[1] = Wire.read();
+        calib_offset_db = raw / 100.0f;
+        prefs.begin("noise", false);
+        prefs.putFloat("calib_db", calib_offset_db);
+        prefs.end();
+    }
+
     while (Wire.available()) {
         Wire.read();
     }
@@ -131,7 +154,8 @@ void requestEvent() {
         case CMD_GET_METADATA: {
             NodeMetadata meta = {
                 FW_VERSION_MAJOR, FW_VERSION_MINOR, FW_VERSION_PATCH,
-                meta_node_type, meta_time_synced, meta_clip_count
+                meta_node_type, meta_time_synced, meta_clip_count,
+                (int16_t)lroundf(calib_offset_db * 100.0f)
             };
             Wire.write((uint8_t *)&meta, sizeof(NodeMetadata));
             break;
@@ -163,6 +187,12 @@ void requestEvent() {
 }
 
 void I2C_Comm_Init() {
+    // Load persistent calibration offset from NVS (0.0 if never set).
+    prefs.begin("noise", true); // read-only
+    calib_offset_db = prefs.getFloat("calib_db", 0.0f);
+    prefs.end();
+    Serial.printf("[INIT] Calibration offset: %.2f dB (from NVS)\n", calib_offset_db);
+
     bool pins_ok = Wire.setPins(I2C_SDA, I2C_SCL);
     
     // Senior Programmer Note: Register callbacks BEFORE begin() to ensure 

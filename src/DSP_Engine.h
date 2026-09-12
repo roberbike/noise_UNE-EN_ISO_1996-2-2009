@@ -80,6 +80,8 @@ struct SensorData {
     float noiseAvgLegalDb;    // Legal average (dB)
     float noiseAvgLegalMax;   // Legal max average (mV)
     float noiseAvgLegalMaxDb; // Legal max average (dB)
+    float noiseLASmaxDb;      // Max with Slow (1 s) time weighting, dB(A)
+    float noiseLCpeakDb;      // Absolute C-weighted peak, dB(C) — impulsive
     uint16_t lowNoiseLevel;   // Dynamic base noise level (used for L90)
     uint32_t cycles;          // Number of cycles completed
     float Ld;                 // Day index
@@ -93,5 +95,9 @@ void DSP_Init();
 float DSP_ApplyFilter(float in, Biquad &f);
 
 extern Biquad aWeightingFilters[3];
+
+// C-weighting cascade (2 biquads, 4th order) for LCpeak — impulsive noise
+// per IEC 61672-1. Flatter than A; used only for the absolute peak detector.
+extern Biquad cWeightingFilters[2];
 
 #endif // DSP_ENGINE_H

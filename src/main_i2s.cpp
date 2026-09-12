@@ -56,6 +56,8 @@ TaskHandle_t aggregator_task_handle = NULL;
 
 struct RawSecondData {
     float max_fast_sq;
+    float max_slow_sq;     // LASmax
+    float peak_c;          // LCpeak (C-weighted absolute peak)
     double sum_sq_A;
     uint32_t samples_count;
     float max_abs_fs;      // raw peak (FS) for mic-alive detection
@@ -70,7 +72,11 @@ void SerialLog(const char *level, const char *msg) {
 // Full-scale RMS -> dB SPL for the ICS-43434 (injected into aggregator).
 //   L = 94 + 20*log10(rms_fs) - (-26) + offset
 static float i2s_fs_to_db(float rms_fs) {
-    return MIC_REF_DB + 20.0f * log10f(rms_fs) - MIC_SENSITIVITY_DBFS + MIC_OFFSET_DB;
+    // MIC_OFFSET_DB is the compile-time trim; I2C_Comm_GetCalibOffset() adds
+    // the NVS field-calibration offset (CMD_SET_CALIB), applied without
+    // reflashing.
+    return MIC_REF_DB + 20.0f * log10f(rms_fs) - MIC_SENSITIVITY_DBFS
+           + MIC_OFFSET_DB + I2C_Comm_GetCalibOffset();
 }
 
 /**
@@ -86,12 +92,17 @@ void sampling_task(void *pvParameters) {
     double sum_sq_A = 0.0;
     float fast_ema_sq = 0.0f;
     float max_fast_sq = 0.0f;
+    float slow_ema_sq = 0.0f;
+    float max_slow_sq = 0.0f;
+    float peak_c = 0.0f;
     float max_abs_fs = 0.0f;
     uint32_t clip_acc = 0;
 
     // Fast time weighting = 125 ms. alpha = 1/(0.125 s * fs), so it tracks the
     // sample rate automatically (1/2000 at 16 kHz, 1/6000 at 48 kHz).
     const float alpha_fast = 1.0f / (0.125f * SAMPLE_RATE);
+    // Slow time weighting = 1 s (LASmax).
+    const float alpha_slow = 1.0f / (1.0f * SAMPLE_RATE);
 
     float dc_offset = 0.0f;
 
@@ -122,11 +133,25 @@ void sampling_task(void *pvParameters) {
             fast_ema_sq = (sq * alpha_fast) + (fast_ema_sq * (1.0f - alpha_fast));
             if (fast_ema_sq > max_fast_sq) max_fast_sq = fast_ema_sq;
 
+            // LASmax: slow (1 s) envelope of the A-weighted squared signal.
+            slow_ema_sq = (sq * alpha_slow) + (slow_ema_sq * (1.0f - alpha_slow));
+            if (slow_ema_sq > max_slow_sq) max_slow_sq = slow_ema_sq;
+
+            // LCpeak: absolute peak of the C-weighted signal (no time weighting).
+            float c_filt = signal;
+            for (int k = 0; k < 2; k++) {
+                c_filt = DSP_ApplyFilter(c_filt, cWeightingFilters[k]);
+            }
+            float c_abs = fabsf(c_filt);
+            if (c_abs > peak_c) peak_c = c_abs;
+
             samples_count++;
 
             if (samples_count >= SAMPLE_RATE) {
                 RawSecondData secData = {
                     .max_fast_sq = max_fast_sq,
+                    .max_slow_sq = max_slow_sq,
+                    .peak_c = peak_c,
                     .sum_sq_A = sum_sq_A,
                     .samples_count = (uint32_t)samples_count,
                     .max_abs_fs = max_abs_fs,
@@ -137,6 +162,8 @@ void sampling_task(void *pvParameters) {
 
                 sum_sq_A = 0.0;
                 max_fast_sq = 0.0f;
+                max_slow_sq = 0.0f;
+                peak_c = 0.0f;
                 max_abs_fs = 0.0f;
                 clip_acc = 0;
                 samples_count = 0;
@@ -164,6 +191,8 @@ void aggregator_task(void *pvParameters) {
             SecondInput in = {
                 .mean_sq = (float)(secData.sum_sq_A / secData.samples_count),
                 .max_fast_sq = secData.max_fast_sq,
+                .max_slow_sq = secData.max_slow_sq,
+                .peak_c = secData.peak_c,
                 .samples = secData.samples_count,
                 .input_valid = input_ok,
                 .clip_count = secData.clip_count
@@ -175,9 +204,10 @@ void aggregator_task(void *pvParameters) {
             I2C_Comm_SetClipCount((uint16_t)secData.clip_count); // #12 metadata
 
             if (valid) {
-                Serial.printf("[ICS43434] LAeq:%.1f | LAFmx:%.1f | L10:%.1f | L90:%d | RMS:%.0fuFS | Lden:%.1f | clip:%u | cyc:%u\n",
-                              out.noiseAvgDb, out.noisePeakDb, out.noiseAvgLegalDb,
-                              out.lowNoiseLevel, out.noiseAvg, out.noiseLden,
+                Serial.printf("[ICS43434] LAeq:%.1f | LAFmx:%.1f | LASmx:%.1f | LCpk:%.1f | L10:%.1f | L90:%d | Lden:%.1f | clip:%u | cyc:%u\n",
+                              out.noiseAvgDb, out.noisePeakDb, out.noiseLASmaxDb,
+                              out.noiseLCpeakDb, out.noiseAvgLegalDb,
+                              out.lowNoiseLevel, out.noiseLden,
                               (unsigned)secData.clip_count, (unsigned)out.cycles);
             } else if (!not_clipped) {
                 SerialLog("WARN", "Clipping detected: reading invalidated");

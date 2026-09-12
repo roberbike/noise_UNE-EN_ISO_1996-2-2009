@@ -1,0 +1,220 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Monitor de ruido UNE-EN ISO 1996-2",
+    "quality_profile": "showcase",
+    "viewBox": [1760, 900],
+    "repository": {
+      "url": "https://github.com/roberbike/noise_UNE-EN_ISO_1996-2-2009",
+      "revision": "df1b0f316c0a68c603ee7cb975fd38a752bbc84e"
+    },
+    "views": [
+      {
+        "id": "camino-medida",
+        "label": "Camino de medida",
+        "focus": ["ics43434", "mic-i2s", "sampling", "dsp", "aggregator", "data-queue", "i2c-slave", "status-gate", "master", "telemetry"],
+        "note": "Del MEMS I2S a los indicadores ISO y a la publicación bajo contrato de estado."
+      },
+      {
+        "id": "cadena-dsp",
+        "label": "Cadena DSP",
+        "focus": ["mic-i2s", "sampling", "dsp", "aggregator"],
+        "note": "Muestreo a 16 kHz, ponderación A y agregación por segundo."
+      },
+      {
+        "id": "limite-i2c",
+        "label": "Límite I2C",
+        "focus": ["i2c-slave", "status-gate", "master"],
+        "note": "El bus 0x08 no autentica; GET_STATUS decide si el maestro puede publicar."
+      },
+      {
+        "id": "publicacion",
+        "label": "Publicación",
+        "focus": ["status-gate", "master", "telemetry"],
+        "note": "Solo reenviar si status es 1 y cycles avanza."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "ics43434",
+      "type": "external",
+      "label": "ICS-43434",
+      "sublabel": "MEMS I2S",
+      "tag": "24 bit",
+      "pos": [48, 310],
+      "size": [148, 64],
+      "sources": [
+        { "path": "README.md", "line": 9, "end_line": 12, "label": "nodo digital" }
+      ]
+    },
+    {
+      "id": "mic-i2s",
+      "type": "backend",
+      "label": "MIC_I2S",
+      "sublabel": "driver DMA",
+      "pos": [228, 310],
+      "size": [148, 64],
+      "sources": [
+        { "path": "src/MIC_I2S.cpp", "line": 27, "end_line": 66, "label": "MIC_I2S_Init" },
+        { "path": "src/MIC_I2S.cpp", "line": 69, "end_line": 98, "label": "i2s_read" }
+      ]
+    },
+    {
+      "id": "sampling",
+      "type": "backend",
+      "label": "sampling_task",
+      "sublabel": "16 kHz",
+      "pos": [408, 310],
+      "size": [148, 64],
+      "sources": [
+        { "path": "src/main_i2s.cpp", "line": 80, "end_line": 190, "label": "sampling_task" }
+      ]
+    },
+    {
+      "id": "dsp",
+      "type": "backend",
+      "label": "DSP_Engine",
+      "sublabel": "biquads A",
+      "pos": [588, 310],
+      "size": [148, 64],
+      "sources": [
+        { "path": "src/DSP_Engine.cpp", "line": 44, "end_line": 49, "label": "DSP_ApplyFilter" }
+      ]
+    },
+    {
+      "id": "aggregator",
+      "type": "backend",
+      "label": "NoiseAggregator",
+      "sublabel": "ISO 1996-2",
+      "tag": "1 s",
+      "pos": [768, 310],
+      "size": [156, 64],
+      "sources": [
+        { "path": "src/NoiseAggregator.cpp", "line": 37, "end_line": 124, "label": "process" }
+      ]
+    },
+    {
+      "id": "data-queue",
+      "type": "messagebus",
+      "label": "dataQueue",
+      "sublabel": "FreeRTOS 1 slot",
+      "pos": [958, 310],
+      "size": [148, 64],
+      "sources": [
+        { "path": "src/main_i2s.cpp", "line": 190, "end_line": 207, "label": "overwrite" }
+      ]
+    },
+    {
+      "id": "i2c-slave",
+      "type": "backend",
+      "label": "I2C_Comm",
+      "sublabel": "esclavo 0x08",
+      "pos": [1138, 310],
+      "size": [148, 64],
+      "sources": [
+        { "path": "src/I2C_Comm.cpp", "line": 90, "end_line": 116, "label": "I2C_Comm_Sync" },
+        { "path": "src/I2C_Comm.cpp", "line": 165, "end_line": 171, "label": "I2C_Comm_Init" }
+      ]
+    },
+    {
+      "id": "status-gate",
+      "type": "security",
+      "label": "GET_STATUS",
+      "sublabel": "contrato 0x20",
+      "pos": [1318, 310],
+      "size": [148, 64],
+      "sources": [
+        { "path": "src/I2C_Comm.cpp", "line": 107, "end_line": 125, "label": "requestEvent" },
+        { "path": "examples/i2c_master/src/main.cpp", "line": 125, "end_line": 150, "label": "publicable" }
+      ]
+    },
+    {
+      "id": "master",
+      "type": "backend",
+      "label": "Maestro I2C",
+      "sublabel": "ESP32-S2/S3",
+      "pos": [1498, 310],
+      "size": [148, 64],
+      "sources": [
+        { "path": "examples/i2c_master/src/main.cpp", "line": 83, "end_line": 130, "label": "poll 0x08" }
+      ]
+    },
+    {
+      "id": "telemetry",
+      "type": "cloud",
+      "label": "InfluxDB",
+      "sublabel": "Grafana / MQTT",
+      "brand": "influxdb",
+      "pos": [1498, 118],
+      "size": [148, 64],
+      "sources": [
+        { "path": "examples/i2c_master/src/main.cpp", "line": 147, "end_line": 151, "label": "publishToCloud" },
+        { "path": "README.md", "line": 11, "end_line": 12, "label": "publicación" }
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Nodo sensor (firmware esclavo)",
+      "wraps": ["mic-i2s", "sampling", "dsp", "aggregator", "data-queue", "i2c-slave", "status-gate"]
+    },
+    {
+      "kind": "security-group",
+      "label": "Bus I2C 0x08 sin autenticación",
+      "wraps": ["i2c-slave", "status-gate", "master"]
+    },
+    {
+      "kind": "region",
+      "label": "Nodo maestro / telemetría",
+      "wraps": ["master", "telemetry"]
+    }
+  ],
+  "connections": [
+    { "id": "mic-to-driver", "from": "ics43434", "to": "mic-i2s", "label": "I2S 16 kHz", "variant": "emphasis", "labelDy": 56 },
+    { "id": "driver-to-task", "from": "mic-i2s", "to": "sampling", "label": "DMA i2s_read", "variant": "emphasis", "labelDy": 56 },
+    { "id": "task-to-dsp", "from": "sampling", "to": "dsp", "label": "muestra", "variant": "emphasis", "labelDy": 56 },
+    { "id": "dsp-to-agg", "from": "dsp", "to": "aggregator", "label": "energía 1 s", "variant": "emphasis", "labelDy": 56 },
+    { "id": "agg-to-queue", "from": "aggregator", "to": "data-queue", "label": "SensorData", "variant": "emphasis", "labelDy": 56 },
+    { "id": "queue-to-i2c", "from": "data-queue", "to": "i2c-slave", "label": "I2C_Comm_Sync", "variant": "emphasis", "labelDy": 56 },
+    { "id": "i2c-to-gate", "from": "i2c-slave", "to": "status-gate", "label": "mic_ok", "variant": "security", "labelDy": 56 },
+    { "id": "gate-to-master", "from": "status-gate", "to": "master", "label": "GET_DATA 0x01", "variant": "emphasis", "labelDy": 56 },
+    { "id": "master-to-cloud", "from": "master", "to": "telemetry", "label": "si publicable", "variant": "dashed" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Camino principal",
+      "items": [
+        "Variante recomendada: XIAO ESP32-S3 + ICS-43434",
+        "El maestro trata ADC e I2S como el mismo SensorData"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Fuera del diagrama",
+      "items": [
+        "Nodo analógico ESP32-C3 + MAX4466 por ADC a 16 kHz",
+        "Hora (CMD 0x09) para Ld/Le/Ln/Lden; sin sync, Lden queda 0"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Confianza",
+      "items": [
+        "I2C local sin cifrado ni autenticación; masa común obligatoria",
+        "status 0 no publica; el nodo retiene el último segundo válido"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Alcance normativo",
+      "items": [
+        "Monitorización y mapas de ruido, no sonómetro IEC 61672 Clase 1/2",
+        "InfluxDB/MQTT son el destino previsto; el ejemplo deja publishToCloud vacío"
+      ]
+    }
+  ]
+}

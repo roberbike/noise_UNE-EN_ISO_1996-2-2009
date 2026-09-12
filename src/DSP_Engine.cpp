@@ -28,12 +28,22 @@ Biquad aWeightingFilters[3] = {
     {1.00000000f, -2.00000000f, 1.00000000f, -1.89387049f, 0.89515977f, 0, 0},
     {1.00000000f, -2.00000000f, 1.00000000f, -1.99461446f, 0.99462171f, 0, 0}
 };
+// C-weighting @ 48 kHz. Verified vs IEC 61672-1: |err| < 0.6 dB up to 8 kHz.
+Biquad cWeightingFilters[2] = {
+    {0.19789071f, 0.39578141f, 0.19789071f, -0.22455846f, 0.01260663f, 0, 0},
+    {1.00000000f, -2.00000000f, 1.00000000f, -1.99461446f, 0.99462171f, 0, 0}
+};
 #else
 // 16 kHz (default). Nyquist at 8 kHz; matches the original coefficient set.
 Biquad aWeightingFilters[3] = {
     {0.529093f, -1.058186f, 0.529093f, -1.983887f, 0.983952f, 0, 0},
     {1.000000f, -2.000000f, 1.000000f, -1.705510f, 0.715988f, 0, 0},
     {1.000000f, 2.000000f, 1.000000f, 0.821564f, 0.168742f, 0, 0}
+};
+// C-weighting @ 16 kHz. Verified vs IEC 61672-1: |err| < 0.6 dB up to 4 kHz.
+Biquad cWeightingFilters[2] = {
+    {0.49718768f, 0.99437536f, 0.49718768f, 0.82156382f, 0.16874178f, 0, 0},
+    {1.00000000f, -2.00000000f, 1.00000000f, -1.98388676f, 0.98395167f, 0, 0}
 };
 #endif
 

@@ -87,7 +87,8 @@ Definidos en [src/I2C_Comm.h](../src/I2C_Comm.h):
 | :--- | :--- | :--- |
 | `CMD_GET_STATUS` | 0x20 | 1 byte: 1 = OK, 0 = no publicar (ver §6) |
 | `CMD_GET_DATA` | 0x01 | `SensorData` completo empaquetado |
-| `CMD_GET_METADATA` | 0x50 | `NodeMetadata` (7 bytes): versión fw, tipo de nodo, time_synced, clip_count |
+| `CMD_GET_METADATA` | 0x50 | `NodeMetadata` (9 bytes): versión fw, tipo de nodo, time_synced, clip_count, calib_offset |
+| `CMD_SET_CALIB` | 0x0A | Escribe offset de calibración (int16 LE, centésimas de dB); se guarda en NVS |
 | `CMD_IDENTIFY` | — | Identificación del nodo |
 | `CMD_LEGACY_*` | — | Lecturas puntuales simples (compatibilidad) |
 
@@ -99,7 +100,7 @@ Definidos en [src/I2C_Comm.h](../src/I2C_Comm.h):
 
 En segundos inválidos el esclavo conserva los últimos valores válidos en la estructura (nunca publica ceros); la señal de invalidez es exclusivamente el status.
 
-**Metadatos del nodo (`CMD_GET_METADATA`).** Devuelve 7 bytes empaquetados:
+**Metadatos del nodo (`CMD_GET_METADATA`).** Devuelve 9 bytes empaquetados:
 
 | Offset | Campo | Tipo | Significado |
 | :--- | :--- | :--- | :--- |
@@ -109,6 +110,7 @@ En segundos inválidos el esclavo conserva los últimos valores válidos en la e
 | 3 | node_type | uint8 | 0x01 = ADC/MAX4466, 0x02 = I2S/ICS-43434 |
 | 4 | time_synced | uint8 | 1 cuando el master ya ha fijado la hora |
 | 5-6 | clip_count | uint16 LE | Muestras a fondo de escala en el último segundo (nodo I2S) |
+| 7-8 | calib_offset | int16 LE | Offset de calibración persistente (NVS), centésimas de dB |
 
 El master puede usarlo para etiquetar la serie en InfluxDB por tipo de nodo,
 verificar que la hora está sincronizada antes de fiarse de Ld/Le/Ln, y detectar
@@ -120,6 +122,23 @@ fondo de escala (>0.99 FS); si en un segundo hay más de 10, la lectura se
 invalida (status 0) en lugar de publicar un LAeq falseado por saturación. Un
 `clip_count` distinto de cero pero por debajo del umbral es una señal temprana
 de que el nivel se acerca al máximo del micrófono (~120 dB SPL).
+
+**Calibración persistente (`CMD_SET_CALIB`).** El maestro puede inyectar un
+offset de calibración en dB (int16 little-endian, centésimas de dB) medido con
+un calibrador acústico físico. El payload es 1 byte de comando + 2 bytes del
+offset. El nodo lo guarda en NVS, sobrevive a reinicios, y lo aplica a todos los
+niveles en la conversión a dB. Ejemplo: con un calibrador emitiendo 94.0 dB, si
+el nodo mide 96.5 dB, el maestro envía −250 (−2.50 dB). El offset vigente se
+puede leer en los metadatos (`calib_offset`). Un offset de 0 significa nodo sin
+calibrar (valor de fábrica).
+
+**Ventana deslizante L10/L90.** Los percentiles se calculan sobre los últimos
+`AGG_WINDOW_SEC` segundos (por defecto 300 s = 5 min, intervalo de referencia
+corto habitual en ISO 1996-2 urbano), en un buffer circular que desliza cada
+segundo. Esto garantiza que, sea cual sea el periodo de sondeo del maestro
+(`stime`), el L10/L90 que lee corresponde a los últimos `AGG_WINDOW_SEC`
+segundos hasta ese instante — sin los saltos por bloques ni el problema de leer
+un bloque recién reseteado. Configurable por build flag `-D AGG_WINDOW_SEC=N`.
 
 ## 5) Lado master: flujo recomendado
 
@@ -142,6 +161,8 @@ Ejemplo de referencia: [examples/i2c_master/src/main.cpp](../examples/i2c_master
 
 ## 7) Semántica de los datos publicados
 
+- **LASmax** (`noiseLASmaxDb`): nivel máximo con ponderación temporal Slow (1 s), dB(A). Menos sensible a transitorios que LAFmax; requerido para ruido de tráfico.
+- **LCpeak** (`noiseLCpeakDb`): pico absoluto con ponderación C, dB(C). Sin constante de tiempo: capta el valor instantáneo de presión, indicador de ruido impulsivo (obras, impactos). En el nodo de 16 kHz cubre hasta 8 kHz; el de 48 kHz cubre la banda completa.
 - **`noiseAvgDb` es el LAeq del último segundo**, no el promedio del intervalo entre lecturas del master. Un master que lee cada 60 s está muestreando 1 segundo de cada 60: válido como indicador de tendencia, pero no es el LAeq,60s. Si se necesita el promedio del intervalo, debe acumularse en el esclavo (cambio de protocolo pendiente de diseño).
 - `noiseAvgLegalDb` (L10) y `lowNoiseLevel` (L90) se recalculan cada bloque completo de 20 s y se mantienen entre bloques.
 - Ld/Le/Ln solo se actualizan dentro de su franja horaria; fuera de ella conservan el último valor del periodo. Lden requiere hora válida en el nodo.

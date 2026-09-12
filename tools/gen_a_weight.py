@@ -60,3 +60,45 @@ for fs in [16000, 48000]:
         # our struct stores {b0,b1,b2,a1,a2} with the DF2T convention used in code.
         print(f"    {{{b0:.8f}f, {b1:.8f}f, {b2:.8f}f, {a1:.8f}f, {a2:.8f}f, 0, 0}},")
     print()
+
+
+# ============================================================
+# C-weighting (IEC 61672-1) — for LCpeak (impulsive noise)
+# C shares f1 and f4 with A but omits f2, f3 (flatter response).
+# 2 zeros at origin, 4 poles (f1 x2, f4 x2). 0 dB @ 1 kHz.
+# ============================================================
+def design_c(fs):
+    z = np.array([0.0, 0.0])
+    p = np.array([-2*np.pi*f1, -2*np.pi*f1, -2*np.pi*f4, -2*np.pi*f4])
+    k = (2*np.pi*f4)**2
+    zd, pd, kd = bilinear_zpk(z, p, k, fs)
+    sos = zpk2sos(zd, pd, kd)
+    w = np.array([2*np.pi*1000/fs])
+    _, h = sosfreqz(sos, worN=w, fs=2*np.pi)
+    sos[0, :3] /= np.abs(h[0])
+    return sos
+
+def check_c(fs, sos):
+    ref = {31.5:-3.0, 63:-0.8, 125:-0.2, 250:0.0, 500:0.0,
+           1000:0.0, 2000:-0.2, 4000:-0.8, 8000:-3.0, 16000:-8.5}
+    freqs = np.array(sorted(ref.keys()))
+    fu = freqs[freqs < fs/2]
+    w = 2*np.pi*fu/fs
+    _, h = sosfreqz(sos, worN=w, fs=2*np.pi)
+    me = 0
+    for f, hi in zip(fu, h):
+        db = 20*np.log10(np.abs(hi)); e = db-ref[f]; me = max(me, abs(e))
+        print(f"    {f:8.0f}  {db:8.2f}  {ref[f]:7.1f}  {e:+.2f}")
+    print(f"    max |err| = {me:.2f} dB")
+
+def print_c():
+    for fs in [16000, 48000]:
+        print(f"=== C-weighting fs = {fs} Hz ===")
+        sos = design_c(fs); check_c(fs, sos)
+        print(f"  SOS ({sos.shape[0]} biquads):")
+        for s in sos:
+            b0,b1,b2,a0,a1,a2 = s
+            print(f"    {{{b0:.8f}f, {b1:.8f}f, {b2:.8f}f, {a1:.8f}f, {a2:.8f}f, 0, 0}},")
+        print()
+
+print_c()

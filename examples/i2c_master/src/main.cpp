@@ -41,6 +41,7 @@
 #define CMD_GET_STATUS_LEGACY 0x00
 #define CMD_GET_DATA 0x01
 #define CMD_GET_METADATA 0x50
+#define CMD_SET_CALIB 0x0A
 
 struct SensorData {
   uint32_t noise;
@@ -54,6 +55,8 @@ struct SensorData {
   float noiseAvgLegalDb;
   float noiseAvgLegalMax;
   float noiseAvgLegalMaxDb;
+  float noiseLASmaxDb;
+  float noiseLCpeakDb;
   uint16_t lowNoiseLevel;
   uint32_t cycles;
   float Ld;
@@ -61,6 +64,19 @@ struct SensorData {
   float Ln;
   float noiseLden;
 };
+
+// Reference helper: push a persistent calibration offset (dB) to the node.
+// The node stores it in NVS (survives reboots) and applies it to every level.
+// Typical use: with a physical calibrator emitting 94.0 dB, if the node reads
+// 96.5 dB, send calibrateNode(-2.5). Call once, not in the polling loop.
+void calibrateNode(float offset_db) {
+  int16_t raw = (int16_t)lroundf(offset_db * 100.0f); // hundredths of dB
+  Wire.beginTransmission(SLAVE_ADDR);
+  Wire.write(CMD_SET_CALIB);
+  Wire.write((uint8_t)(raw & 0xFF));
+  Wire.write((uint8_t)((raw >> 8) & 0xFF));
+  Wire.endTransmission();
+}
 
 void setup() {
   Serial.begin(115200);
@@ -136,7 +152,9 @@ void loop() {
                     (status == 1 ? "MIC OK" : "MIC ERROR"),
                     (publishable ? "PUBLISH" : "SKIP (stale/not ready)"));
       Serial.printf("LAeq (1s): %.2f dB\n", data.noiseAvgDb);
-      Serial.printf("Lmax (1s): %.2f dB\n", data.noisePeakDb);
+      Serial.printf("LAFmax (1s): %.2f dB\n", data.noisePeakDb);
+      Serial.printf("LASmax (1s): %.2f dB\n", data.noiseLASmaxDb);
+      Serial.printf("LCpeak: %.2f dB\n", data.noiseLCpeakDb);
       Serial.printf("L10 (Legal): %.2f dB\n", data.noiseAvgLegalDb);
       Serial.printf("L90 (Backg): %u\n", data.lowNoiseLevel);
       Serial.printf("Lden (24h): %.2f dB\n", data.noiseLden);
@@ -151,19 +169,22 @@ void loop() {
         // publishToCloud(data);   // integrate here
       }
 
-      // #12: optional metadata read (fw version, node type, time-sync, clips)
+      // #12: optional metadata read (fw version, node type, time-sync, clips,
+      // NVS calibration offset). Metadata is 9 bytes as of the calibration
+      // feature; older nodes returned 7.
       Wire.beginTransmission(SLAVE_ADDR);
       Wire.write(CMD_GET_METADATA);
       if (Wire.endTransmission() == 0) {
         delay(5);
-        if (Wire.requestFrom((uint16_t)SLAVE_ADDR, (size_t)7) == 7) {
-          uint8_t m[7];
-          for (int i = 0; i < 7; i++) m[i] = Wire.read();
+        if (Wire.requestFrom((uint16_t)SLAVE_ADDR, (size_t)9) == 9) {
+          uint8_t m[9];
+          for (int i = 0; i < 9; i++) m[i] = Wire.read();
           uint16_t clips = (uint16_t)m[5] | ((uint16_t)m[6] << 8);
-          Serial.printf("Meta: fw %u.%u.%u | node=%s | time_synced=%u | clips=%u\n",
+          int16_t calib = (int16_t)((uint16_t)m[7] | ((uint16_t)m[8] << 8));
+          Serial.printf("Meta: fw %u.%u.%u | node=%s | time_synced=%u | clips=%u | calib=%.2f dB\n",
                         m[0], m[1], m[2],
                         (m[3] == 0x02 ? "I2S" : (m[3] == 0x01 ? "ADC" : "?")),
-                        m[4], clips);
+                        m[4], clips, calib / 100.0f);
         }
       }
     } else {

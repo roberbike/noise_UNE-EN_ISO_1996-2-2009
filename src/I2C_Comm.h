@@ -56,6 +56,12 @@
 // #12 Node metadata (firmware version, node type, time-sync, clipping)
 #define CMD_GET_METADATA 0x50
 
+// Persistent calibration: master writes a dB offset (int16, hundredths of dB,
+// e.g. 55.4 dB target vs 65.4 measured -> -1000) with a physical calibrator;
+// the node stores it in NVS so it survives reboots and applies it to every
+// level. Payload: 1 cmd byte + 2 bytes int16 little-endian.
+#define CMD_SET_CALIB 0x0A
+
 #define FW_VERSION_MAJOR 3
 #define FW_VERSION_MINOR 2
 #define FW_VERSION_PATCH 1
@@ -68,6 +74,7 @@ struct NodeMetadata {
     uint8_t node_type;        // 0x01 = ADC/MAX4466, 0x02 = I2S/ICS-43434
     uint8_t time_synced;      // 1 once the master has set the clock
     uint16_t clip_count;      // full-scale samples in the last second (I2S)
+    int16_t calib_offset;     // NVS calibration offset, hundredths of dB
 } __attribute__((packed));
 
 // --- Secure Queue Payload ---
@@ -97,5 +104,11 @@ void I2C_Comm_SetClipCount(uint16_t clip_count);
 // #5 time-sync gate: true once the master has set the clock via
 // CMD_SET_TIME_LEGACY. The aggregator polls this before computing Ld/Le/Ln.
 bool I2C_Comm_TimeSynced();
+
+// Persistent calibration offset in dB, loaded from NVS at init and updated by
+// CMD_SET_CALIB. The node firmware reads this and applies it to every level
+// (typically by feeding it into the amplitude->dB conversion). Returns 0.0 if
+// never calibrated.
+float I2C_Comm_GetCalibOffset();
 
 #endif // I2C_COMM_H

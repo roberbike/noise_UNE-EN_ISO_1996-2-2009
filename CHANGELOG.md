@@ -4,6 +4,52 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [3.3.0-devel] - 2026-08-25
+
+### Added
+
+- **LASmax and LCpeak (Qwen review, point 4)**: the aggregator now also reports
+  the max level with Slow (1 s) time weighting, `LASmax`, and the absolute
+  C-weighted peak, `LCpeak`, required by IEC 61672-1 for traffic and impulsive
+  noise. New `SensorData` fields `noiseLASmaxDb` / `noiseLCpeakDb`. C-weighting
+  is a separate 2-biquad (4th order) cascade `cWeightingFilters`, with
+  coefficients per sample rate (16 kHz and 48 kHz) generated and verified
+  against IEC 61672-1 nominal values (|err| < 0.6 dB in the measurable band);
+  see `tools/gen_a_weight.py`. On the 16 kHz node the C-weighting is stable and
+  accurate to <0.5 dB up to 4 kHz — the bilinear transform maps the 12.2 kHz
+  pole below Nyquist without aliasing; only the acquisition band (<8 kHz)
+  limits the peak, exactly as for A-weighting.
+
+### Added (earlier in devel)
+
+- **Sliding-window L10/L90 (Qwen review, point 2)**: the percentiles are now
+  computed over a circular buffer of the last `AGG_WINDOW_SEC` seconds
+  (default 300 s = 5 min, the ISO 1996-2 short-term urban reference), sliding
+  every second. The master always reads the percentiles for the last window up
+  to its read, regardless of its polling period (`stime`) — this removes both
+  the 20 s "staircase" and the stale-block problem when the master's read and
+  the node's block boundary didn't align. Configurable via
+  `-D AGG_WINDOW_SEC=<seconds>`. Uses `std::nth_element` (O(N)) instead of the
+  old O(N²) selection sort, so large windows stay cheap.
+- **Persistent calibration in NVS (Qwen review, point 3)**: new I2C command
+  `CMD_SET_CALIB` (0x0A) lets the master push a dB offset (int16, hundredths
+  of dB) measured with a physical calibrator. The node stores it in NVS
+  (survives reboots) and applies it to every level via the amplitude→dB
+  conversion — no reflashing to calibrate a node in the field. The offset is
+  loaded at boot and exposed in the metadata.
+- `NodeMetadata` extended with `calib_offset` (int16, hundredths of dB); it is
+  now 9 bytes (was 7). The example master reads the new field and includes a
+  `calibrateNode()` reference helper.
+
+### Notes
+
+- RAM for the window buffer is small (2.3 KB at 300 s, 4.7 KB at 600 s) — fine
+  on both the C3 and the S3.
+- This is a `devel` branch entry; version tagged `3.3.0-devel` pending on-board
+  validation before release.
+
+---
+
 ## [3.2.1] - 2026-08-21
 
 ### Changed

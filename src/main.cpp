@@ -57,6 +57,8 @@ TaskHandle_t aggregator_task_handle = NULL;
 
 struct RawSecondData {
     float max_fast_sq;
+    float max_slow_sq;     // LASmax
+    float peak_c;          // LCpeak (C-weighted absolute peak)
     double sum_sq_A;
     uint32_t samples_count;
 };
@@ -72,7 +74,11 @@ bool check_microphone_connection(uint32_t bias_mv) {
 
 // Amplitude(mV) -> dB SPL for the ADC/MAX4466 path (injected into aggregator).
 static float adc_amp_to_db(float rms_mv) {
-    return 20.0f * log10f(rms_mv / CALIBRATION_RMS_MV) + CALIBRATION_DB;
+    // CALIBRATION_DB is the compile-time reference; I2C_Comm_GetCalibOffset()
+    // adds a field trim stored in NVS (CMD_SET_CALIB), so a calibrator can
+    // correct the node without reflashing.
+    return 20.0f * log10f(rms_mv / CALIBRATION_RMS_MV) + CALIBRATION_DB
+           + I2C_Comm_GetCalibOffset();
 }
 
 /**
@@ -87,9 +93,14 @@ void sampling_task(void *pvParameters) {
     double sum_sq_A = 0.0;
     float fast_ema_sq = 0.0f;
     float max_fast_sq = 0.0f;
+    float slow_ema_sq = 0.0f;
+    float max_slow_sq = 0.0f;
+    float peak_c = 0.0f;
 
     // Fast time weighting = 125 ms. alpha = 1/(0.125 s * fs).
     const float alpha_fast = 1.0f / (0.125f * SAMPLE_RATE);
+    // Slow time weighting = 1 s (LASmax).
+    const float alpha_slow = 1.0f / (1.0f * SAMPLE_RATE);
 
     uint32_t next_sample_time = micros();
 
@@ -119,11 +130,25 @@ void sampling_task(void *pvParameters) {
             fast_ema_sq = (sq * alpha_fast) + (fast_ema_sq * (1.0f - alpha_fast));
             if (fast_ema_sq > max_fast_sq) max_fast_sq = fast_ema_sq;
 
+            // LASmax: slow (1 s) envelope of the A-weighted squared signal.
+            slow_ema_sq = (sq * alpha_slow) + (slow_ema_sq * (1.0f - alpha_slow));
+            if (slow_ema_sq > max_slow_sq) max_slow_sq = slow_ema_sq;
+
+            // LCpeak: absolute peak of the C-weighted signal (no time weighting).
+            float c_filt = signal;
+            for (int k = 0; k < 2; k++) {
+                c_filt = DSP_ApplyFilter(c_filt, cWeightingFilters[k]);
+            }
+            float c_abs = fabsf(c_filt);
+            if (c_abs > peak_c) peak_c = c_abs;
+
             samples_count++;
 
             if (samples_count >= SAMPLE_RATE) {
                 RawSecondData secData = {
                     .max_fast_sq = max_fast_sq,
+                    .max_slow_sq = max_slow_sq,
+                    .peak_c = peak_c,
                     .sum_sq_A = sum_sq_A,
                     .samples_count = (uint32_t)samples_count
                 };
@@ -132,6 +157,8 @@ void sampling_task(void *pvParameters) {
 
                 sum_sq_A = 0.0;
                 max_fast_sq = 0.0f;
+                max_slow_sq = 0.0f;
+                peak_c = 0.0f;
                 samples_count = 0;
             }
 
@@ -161,6 +188,8 @@ void aggregator_task(void *pvParameters) {
             SecondInput in = {
                 .mean_sq = (float)(secData.sum_sq_A / secData.samples_count),
                 .max_fast_sq = secData.max_fast_sq,
+                .max_slow_sq = secData.max_slow_sq,
+                .peak_c = secData.peak_c,
                 .samples = secData.samples_count,
                 .input_valid = input_ok,
                 .clip_count = 0 // ADC path: clipping handled by bias range
@@ -169,9 +198,10 @@ void aggregator_task(void *pvParameters) {
             bool valid = aggregator.process(in, out, mic_ok);
 
             if (valid) {
-                Serial.printf("[SMART] LAeq:%.1f | LAFmx:%.1f | L10:%.1f | L90:%d | RMS:%.2fmV | Lden:%.1f | cyc:%u\n",
-                              out.noiseAvgDb, out.noisePeakDb, out.noiseAvgLegalDb,
-                              out.lowNoiseLevel, out.noiseAvg, out.noiseLden,
+                Serial.printf("[SMART] LAeq:%.1f | LAFmx:%.1f | LASmx:%.1f | LCpk:%.1f | L10:%.1f | L90:%d | Lden:%.1f | cyc:%u\n",
+                              out.noiseAvgDb, out.noisePeakDb, out.noiseLASmaxDb,
+                              out.noiseLCpeakDb, out.noiseAvgLegalDb,
+                              out.lowNoiseLevel, out.noiseLden,
                               (unsigned)out.cycles);
             } else {
                 SerialLog("WARN", "Microphone range error/disconnected");
