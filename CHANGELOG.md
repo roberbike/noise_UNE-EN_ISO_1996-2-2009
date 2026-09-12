@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [3.3.0-devel] - 2026-08-25
+## [3.3.0] - 2026-09-12
 
 ### Added
 
@@ -45,8 +45,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - RAM for the window buffer is small (2.3 KB at 300 s, 4.7 KB at 600 s) — fine
   on both the C3 and the S3.
-- This is a `devel` branch entry; version tagged `3.3.0-devel` pending on-board
-  validation before release.
+- Released as `3.3.0` after on-board validation.
 
 ---
 
