@@ -102,3 +102,63 @@ def print_c():
         print()
 
 print_c()
+
+
+# ============================================================
+# Least-squares fit of the third section for fs = 16 kHz (#3.3.1)
+# At 16 kHz the 12194 Hz pole of the analog prototype is above Nyquist, so the
+# plain bilinear transform collapses it and the response falls off far too
+# early (-12 dB at 7 kHz). Sections 1-2 are exact and kept; section 3 is fitted
+# over 20 Hz-7.9 kHz. Reproduces the coefficients shipped in DSP_Engine.cpp.
+# ============================================================
+def fit_third_section_16k():
+    from scipy.optimize import minimize
+    fs = 16000
+    base = [(0.529093,-1.058186,0.529093,-1.983887,0.983952),
+            (1.0,-2.0,1.0,-1.705510,0.715988)]
+    seed = (1.0, 2.0, 1.0, 0.821564, 0.168742)   # bilinear section (poor fit)
+    fev = np.logspace(np.log10(20), np.log10(7900), 200)
+    tgt = a_ideal_db(fev) if 'a_ideal_db' in globals() else None
+    if tgt is None:
+        ra = (f4**2*fev**4)/((fev**2+f1**2)*np.sqrt((fev**2+f2**2)*(fev**2+f3**2))*(fev**2+f4**2))
+        tgt = 20*np.log10(ra) + A1000
+
+    def mk(c): return np.array([[b0,b1,b2,1.0,a1,a2] for b0,b1,b2,a1,a2 in c])
+    def db(c, f):
+        _, h = sosfreqz(mk(c), worN=2*np.pi*np.asarray(f)/fs, fs=2*np.pi)
+        return 20*np.log10(np.abs(h)+1e-30)
+
+    def cost(p):
+        b0,b1,b2,a1,a2 = p
+        if max(abs(np.roots([1,a1,a2]))) >= 0.999:      # keep it stable
+            return 1e9
+        c = base + [(b0,b1,b2,a1,a2)]
+        try: r = db(c, fev) - db(c, [1000.0])[0]        # normalize at 1 kHz
+        except Exception: return 1e9
+        return 1e9 if not np.all(np.isfinite(r)) else np.sqrt(np.mean((r-tgt)**2))
+
+    best = None
+    for s_ in range(40):
+        rng = np.random.default_rng(s_)
+        g = np.array(seed)*(1+0.35*rng.standard_normal(5)) if s_ else np.array(seed)
+        r = minimize(cost, g, method='Nelder-Mead',
+                     options={'maxiter':8000,'xatol':1e-9,'fatol':1e-11})
+        if best is None or r.fun < best.fun: best = r
+
+    c = base + [tuple(best.x)]
+    n = db(c, [1000.0])[0]
+    sc = 10**(-n/20)                                     # fold 0 dB @1 kHz into b
+    b0,b1,b2,a1,a2 = best.x
+    print(f"=== A-weighting, fs = 16000 Hz, fitted 3rd section ===")
+    print(f"  RMS error over 20 Hz-7.9 kHz: {best.fun:.3f} dB")
+    fr = [63,125,250,500,1000,2000,3150,4000,5000,6300,7000,7900]
+    r = db(c, fr) - n
+    ra = (np.asarray(fr,float)**4*f4**2)/((np.asarray(fr,float)**2+f1**2)*np.sqrt((np.asarray(fr,float)**2+f2**2)*(np.asarray(fr,float)**2+f3**2))*(np.asarray(fr,float)**2+f4**2))
+    ri = 20*np.log10(ra)+A1000
+    for k,f in enumerate(fr):
+        print(f"    {f:5d} Hz  err {r[k]-ri[k]:+6.2f} dB")
+    print("  third section for DSP_Engine.cpp:")
+    print("    {%.8ff, %.8ff, %.8ff, %.8ff, %.8ff, 0, 0}"
+          % (b0*sc, b1*sc, b2*sc, a1, a2))
+
+fit_third_section_16k()

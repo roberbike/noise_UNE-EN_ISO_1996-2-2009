@@ -43,9 +43,13 @@
 #define WARMUP_MS 500              // mic power-up + IIR transient
 #define WDT_TIMEOUT_S 5
 
-// #4 realistic disconnection threshold. The ICS-43434's own noise floor sits
-// around 1e-5 FS (~30 dBA). The previous 1e-6 FS (~0 dB SPL) never triggered.
-// 1e-5 FS detects a dead SD line without false positives on the real floor.
+// #4 disconnection threshold. Corrected figures (#B5): with the sensitivity
+// conversion used here, 1e-5 FS is 20.0 dB SPL — not 30 dBA as previously
+// commented. The mic's own noise floor (30 dBA spec, ~34 dB measured) sits at
+// 3.2e-5..5.0e-5 FS, so this threshold stays ~14 dB below it: low enough never
+// to fire on the real floor, high enough to catch a dead SD line (which reads
+// orders of magnitude lower). The previous 1e-6 FS was 0 dB SPL and never
+// triggered at all.
 #define MIC_MIN_RMS_FS 1e-5f
 
 // #3 max clips tolerated per second before invalidating the reading.
@@ -219,6 +223,7 @@ void aggregator_task(void *pvParameters) {
             i2cMsg.mic_ok = mic_ok;
             xQueueOverwrite(dataQueue, &i2cMsg);
             I2C_Comm_Sync();
+            I2C_Comm_Service(); // deferred clock set + NVS write (task context)
         } else {
             SerialLog("WARN", "No samples for 2 s: I2S sampling stalled");
             i2cMsg.data = out;
@@ -290,5 +295,9 @@ void setup() {
 }
 
 void loop() {
-    vTaskDelete(NULL);
+    // #R2 The Arduino core may have this task subscribed to the TWDT.
+    // Deleting a subscribed task without unsubscribing first is undefined
+    // behaviour, so detach it and then park the task instead of deleting it.
+    esp_task_wdt_delete(NULL);
+    vTaskDelay(portMAX_DELAY);
 }

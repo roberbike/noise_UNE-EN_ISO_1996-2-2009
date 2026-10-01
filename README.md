@@ -122,8 +122,15 @@ Notas importantes para interpretar los datos:
 - **LAeq,1s es el nivel del último segundo**, no el promedio del intervalo entre
   lecturas del maestro. Si el maestro lee cada 60 s, obtiene 1 segundo de cada
   60: válido como tendencia, no es el LAeq,60s.
-- **L10 y L90 se recalculan cada bloque completo de 20 s** y se mantienen
-  constantes entre bloques (no es un error: es su cadencia de actualización).
+- **L10 y L90 se calculan sobre una ventana deslizante** de los últimos
+  `AGG_WINDOW_SEC` segundos (300 s por defecto), que avanza cada segundo. El
+  maestro obtiene siempre el percentil de los últimos 300 s hasta su lectura,
+  sea cual sea su periodo de sondeo.
+- **Lden solo promedia los periodos que ya tienen datos**, para que un periodo
+  aún sin muestras no hunda el resultado.
+- **La hora la envía el maestro en epoch LOCAL**, no UTC: el nodo no aplica
+  zona horaria, así que las franjas día/tarde/noche se leen tal cual del epoch
+  recibido. Enviar UTC desplaza todos los índices una o dos horas en España.
 - **Ld/Le/Ln y Lden solo se calculan con hora sincronizada.** Hasta que el
   maestro envía la hora por I2C, Lden se queda en 0.0 (comportamiento correcto,
   no un fallo). Ver el contrato en [docs/COMUNICACION.md](docs/COMUNICACION.md).
@@ -139,9 +146,12 @@ Notas importantes para interpretar los datos:
 **Qué exige la normativa** (UNE-EN ISO 1996-2:2009 y Decreto 213/2012 del País
 Vasco, o equivalentes como el Decreto 266/2004 de C. Valenciana):
 
-- Niveles expresados en dB(A) → **ponderación A: implementada** (biquads IIR a 16 kHz).
-- Ponderación temporal Fast (125 ms) / Slow (1 s) → **Fast implementada** (LAFmax).
-- Indicadores LAeq, Ld/Le/Ln, Lden, L10/L90 → **todos implementados**.
+- Niveles expresados en dB(A) → **ponderación A implementada y verificada**
+  contra IEC 61672-1: ±0.15 dB hasta 7.9 kHz en el nodo de 16 kHz (tercera
+  sección ajustada por mínimos cuadrados, porque el polo de 12194 Hz queda por
+  encima de Nyquist a esa frecuencia) y ±0.52 dB en el de 48 kHz.
+- Ponderación temporal Fast (125 ms) / Slow (1 s) → **ambas implementadas** (LAFmax y LASmax), más el **pico con ponderación C** (LCpeak) para ruido impulsivo.
+- Indicadores LAeq, LAFmax, LASmax, LCpeak, Ld/Le/Ln, Lden, L10/L90 → **todos implementados**.
 - Instrumento de **Clase 1** (medidas legales de precisión) o **Clase 2**
   (medidas de campo) según IEC 61672-1.
 

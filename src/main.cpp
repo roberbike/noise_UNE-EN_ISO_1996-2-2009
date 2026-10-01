@@ -39,6 +39,12 @@
 
 #define NODE_TYPE_ADC 0x01         // reported via I2C metadata
 
+// #B4 overload thresholds for the 12-bit ADC, and how many clipped samples in
+// one second invalidate the reading (same policy as the I2S node).
+#define ADC_CLIP_HIGH 4090
+#define ADC_CLIP_LOW  5
+#define ADC_MAX_CLIPS_PER_SEC 10
+
 // Task/sampling watchdog: if a task stops feeding it, the chip resets instead
 // of running mute. 5 s covers the 2 s aggregator timeout with margin.
 #define WDT_TIMEOUT_S 5
@@ -61,6 +67,7 @@ struct RawSecondData {
     float peak_c;          // LCpeak (C-weighted absolute peak)
     double sum_sq_A;
     uint32_t samples_count;
+    uint32_t clip_count;   // #B4 samples at either ADC rail this second
 };
 QueueHandle_t timerToTaskQueue;
 
@@ -96,6 +103,8 @@ void sampling_task(void *pvParameters) {
     float slow_ema_sq = 0.0f;
     float max_slow_sq = 0.0f;
     float peak_c = 0.0f;
+    uint32_t clip_acc = 0;      // #B4 samples pinned at either ADC rail
+    uint32_t period_frac = 0;   // #B1 fractional part of the sample period
 
     // Fast time weighting = 125 ms. alpha = 1/(0.125 s * fs).
     const float alpha_fast = 1.0f / (0.125f * SAMPLE_RATE);
@@ -115,6 +124,12 @@ void sampling_task(void *pvParameters) {
             }
 
             uint32_t raw = adc1_get_raw(ADC_CHANNEL);
+
+            // #B4 overload detection. The bias check only looks at the DC
+            // average, so it cannot see clipping: a signal pinned at either
+            // rail keeps the mean centred. IEC 61672 requires an overload
+            // indication, so count samples sitting at the ends of the range.
+            if (raw >= ADC_CLIP_HIGH || raw <= ADC_CLIP_LOW) clip_acc++;
 
             dc_offset = (dc_offset * 0.9999f) + ((float)raw * 0.0001f);
             float signal = (float)raw - dc_offset;
@@ -150,7 +165,8 @@ void sampling_task(void *pvParameters) {
                     .max_slow_sq = max_slow_sq,
                     .peak_c = peak_c,
                     .sum_sq_A = sum_sq_A,
-                    .samples_count = (uint32_t)samples_count
+                    .samples_count = (uint32_t)samples_count,
+                    .clip_count = clip_acc
                 };
                 xQueueOverwrite(timerToTaskQueue, &secData);
                 esp_task_wdt_reset(); // fed once per completed second
@@ -159,10 +175,19 @@ void sampling_task(void *pvParameters) {
                 max_fast_sq = 0.0f;
                 max_slow_sq = 0.0f;
                 peak_c = 0.0f;
+                clip_acc = 0;
                 samples_count = 0;
             }
 
+            // #B1 exact average rate: add the integer period and borrow one
+            // extra microsecond whenever the accumulated remainder overflows
+            // (62/63 us alternating at 16 kHz -> 62.5 us mean = 16000.0 Hz).
             next_sample_time += SAMPLE_PERIOD_US;
+            period_frac += SAMPLE_PERIOD_REM;
+            if (period_frac >= SAMPLE_RATE) {
+                period_frac -= SAMPLE_RATE;
+                next_sample_time += 1;
+            }
         } else {
             taskYIELD(); // dead time: let I2C slave callbacks run
         }
@@ -183,7 +208,9 @@ void aggregator_task(void *pvParameters) {
         if (xQueueReceive(timerToTaskQueue, &secData, pdMS_TO_TICKS(2000)) == pdTRUE) {
             // Bias/connection check (ADC-specific) folds into input_valid.
             uint32_t bias_mv = esp_adc_cal_raw_to_voltage((uint32_t)dc_offset, &adc_chars);
-            bool input_ok = check_microphone_connection(bias_mv);
+            bool bias_ok = check_microphone_connection(bias_mv);
+            bool not_clipped = (secData.clip_count <= ADC_MAX_CLIPS_PER_SEC);
+            bool input_ok = bias_ok && not_clipped;
 
             SecondInput in = {
                 .mean_sq = (float)(secData.sum_sq_A / secData.samples_count),
@@ -192,10 +219,11 @@ void aggregator_task(void *pvParameters) {
                 .peak_c = secData.peak_c,
                 .samples = secData.samples_count,
                 .input_valid = input_ok,
-                .clip_count = 0 // ADC path: clipping handled by bias range
+                .clip_count = secData.clip_count
             };
 
             bool valid = aggregator.process(in, out, mic_ok);
+            I2C_Comm_SetClipCount((uint16_t)secData.clip_count); // #B4 metadata
 
             if (valid) {
                 Serial.printf("[SMART] LAeq:%.1f | LAFmx:%.1f | LASmx:%.1f | LCpk:%.1f | L10:%.1f | L90:%d | Lden:%.1f | cyc:%u\n",
@@ -203,6 +231,8 @@ void aggregator_task(void *pvParameters) {
                               out.noiseLCpeakDb, out.noiseAvgLegalDb,
                               out.lowNoiseLevel, out.noiseLden,
                               (unsigned)out.cycles);
+            } else if (!not_clipped) {
+                SerialLog("WARN", "Overload: ADC clipping, reading invalidated");
             } else {
                 SerialLog("WARN", "Microphone range error/disconnected");
             }
@@ -211,6 +241,7 @@ void aggregator_task(void *pvParameters) {
             i2cMsg.mic_ok = mic_ok;
             xQueueOverwrite(dataQueue, &i2cMsg);
             I2C_Comm_Sync();
+            I2C_Comm_Service(); // deferred clock set + NVS write (task context)
         } else {
             // No second in 2 s: sampling stalled. Surface it (status 0,
             // cycles frozen) instead of serving a frozen struct. The task
@@ -288,5 +319,9 @@ void setup() {
 }
 
 void loop() {
-    vTaskDelete(NULL);
+    // #R2 The Arduino core may have this task subscribed to the TWDT.
+    // Deleting a subscribed task without unsubscribing first is undefined
+    // behaviour, so detach it and then park the task instead of deleting it.
+    esp_task_wdt_delete(NULL);
+    vTaskDelay(portMAX_DELAY);
 }

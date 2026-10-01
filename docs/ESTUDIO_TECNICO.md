@@ -23,7 +23,7 @@ El Decreto y la norma UNE 1996-2 exigen el uso de instrumentos de **Clase 1** (p
 
 ### 3.2. Ponderación Frecuencial (A-Weighting)
 La normativa exige que los niveles se expresen en $dB(A)$. 
-- **Estado Actual:** **Implementado.** Cascada de 3 biquads IIR (6º orden en total) que aplica la curva de ponderación A a la frecuencia de muestreo de 16 kHz. Los coeficientes asumen 16 kHz (ver DSP_Engine.cpp); una validación formal frente a IEC 61672-1 con barrido de tonos queda pendiente.
+- **Estado Actual:** **Implementado y verificado.** Cascada de 3 biquads IIR (6º orden) normalizada a 0 dB @ 1 kHz. Error frente a la curva A de IEC 61672-1: **±0,15 dB hasta 7,9 kHz** en el nodo de 16 kHz y **±0,52 dB** en el de 48 kHz. Nota: a 16 kHz el polo de 12194 Hz del prototipo analógico queda por encima de Nyquist, por lo que la tercera sección no es la bilineal directa (que caía −12 dB a 7 kHz) sino un ajuste por mínimos cuadrados sobre 20 Hz–7,9 kHz. Ver `tools/gen_a_weight.py`.
 
 ### 3.3. Ponderación Temporal (Fast/Slow)
 Las medidas de $L_{max}$ y $L_{min}$ requieren constantes de tiempo normalizadas:
@@ -68,3 +68,18 @@ Para garantizar la fiabilidad, se propone el siguiente método utilizando un **s
 1.  **Software:** La **ponderación A** está implementada y el muestreo fijado a **16 kHz** (adecuado para monitorización de ruido urbano; 48 kHz sería necesario para aspirar a Clase 1).
 2.  **Legalidad:** El equipo es excelente para **"Smart City Monitoring"** y pre-evaluación, pero los datos no son legalmente vinculantes para sanciones sin un certificado de metrología estatal.
 3.  **Microfonía:** Para mayor precisión profesional, se recomienda sustituir la cápsula de electreto de 50 céntimos por una cápsula de medición MEMS (como la INMP441 o ICS-43434) que tiene respuesta plana y salida digital I2S, eliminando el ruido del ADC interno del ESP32.
+
+## 7. Limitación conocida: ausencia de filtro antialiasing (nodo ADC)
+
+El nodo analógico muestrea el MAX4466 directamente con el ADC del ESP32-C3, sin
+filtro antialiasing analógico. Todo el contenido por encima de 8 kHz se repliega
+dentro de la banda de medida. Para espectros urbanos de tráfico ese contenido es
+≈1,3 % de la energía ponderada A, por lo que el efecto es menor, pero con
+fuentes ricas en agudos (siseos, impulsos) puede ser apreciable.
+
+La tercera sección del filtro A anterior tenía un cero en Nyquist que enmascaraba
+parcialmente ese replegado; la versión ajustada (±0,15 dB hasta 7,9 kHz) ya no lo
+hace, de modo que el aliasing queda al descubierto en lugar de oculto. La
+solución correcta es física: un filtro RC paso bajo de ~8 kHz a la salida del
+MAX4466. El nodo digital (I2S a 48 kHz) no tiene este problema: el ICS-43434
+incorpora su propio filtro de decimación.

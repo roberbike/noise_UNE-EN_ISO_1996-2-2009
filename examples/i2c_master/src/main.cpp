@@ -42,6 +42,7 @@
 #define CMD_GET_DATA 0x01
 #define CMD_GET_METADATA 0x50
 #define CMD_SET_CALIB 0x0A
+#define CMD_SET_TIME  0x09   // epoch (uint32 LE) — see setNodeTime()
 
 struct SensorData {
   uint32_t noise;
@@ -55,14 +56,17 @@ struct SensorData {
   float noiseAvgLegalDb;
   float noiseAvgLegalMax;
   float noiseAvgLegalMaxDb;
-  float noiseLASmaxDb;
-  float noiseLCpeakDb;
   uint16_t lowNoiseLevel;
   uint32_t cycles;
   float Ld;
   float Le;
   float Ln;
   float noiseLden;
+  // Appended in 3.3.1. In 3.3.0 these two sat BEFORE lowNoiseLevel, which
+  // shifted everything after it by 8 bytes relative to the 3.2.x layout that
+  // CanAirIO and other existing masters still use. Keep them last.
+  float noiseLASmaxDb;
+  float noiseLCpeakDb;
 };
 
 // Reference helper: push a persistent calibration offset (dB) to the node.
@@ -78,6 +82,26 @@ void calibrateNode(float offset_db) {
   Wire.endTransmission();
 }
 
+// #B10 Push the wall clock to the node. Without this the node never sets
+// time_synced, so Ld/Le/Ln/Lden stay at 0 forever — with the stock example
+// that was exactly what happened.
+//
+// IMPORTANT: send LOCAL epoch, not UTC. The node applies no timezone of its
+// own, so the day (07-19 h), evening (19-23 h) and night (23-07 h) bands are
+// read straight off whatever you send. In Spain that means UTC + 1 h in
+// winter and UTC + 2 h in summer; get it wrong and every period index is
+// shifted by an hour. Call it once after the node answers, and again after
+// any DST change or clock resync.
+void setNodeTime(uint32_t local_epoch) {
+  Wire.beginTransmission(SLAVE_ADDR);
+  Wire.write(CMD_SET_TIME);
+  Wire.write((uint8_t)(local_epoch & 0xFF));
+  Wire.write((uint8_t)((local_epoch >> 8) & 0xFF));
+  Wire.write((uint8_t)((local_epoch >> 16) & 0xFF));
+  Wire.write((uint8_t)((local_epoch >> 24) & 0xFF));
+  Wire.endTransmission();
+}
+
 void setup() {
   Serial.begin(115200);
   delay(2000);
@@ -86,6 +110,12 @@ void setup() {
   Wire.setTimeOut(100); // 100 ms hardware timeout to prevent master-side lockups
   Serial.printf("I2C Initialized (SDA=%d, SCL=%d). Polling Slave 0x%02X...\n",
                 I2C_SDA, I2C_SCL, SLAVE_ADDR);
+
+  // #B10 Set the node clock. Replace with your real local epoch (NTP + your
+  // timezone offset, or an RTC already holding local time). The node needs
+  // this before it can produce Ld/Le/Ln/Lden; metadata byte 4 reports whether
+  // it took effect (time_synced).
+  // setNodeTime(local_epoch_from_your_time_source());
 }
 
 void loop() {

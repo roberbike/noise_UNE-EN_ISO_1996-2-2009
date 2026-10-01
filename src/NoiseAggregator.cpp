@@ -114,6 +114,20 @@ bool NoiseAggregator::process(const SecondInput &in, SensorData &out, uint8_t &m
         if (I2C_Comm_TimeSynced()) {
             struct tm timeinfo;
             if (getLocalTime(&timeinfo, 0)) {
+                // #B8 Roll the day over BEFORE accumulating. Doing it after
+                // meant the first second of a new day landed in yesterday's
+                // accumulators and was then thrown away by the reset. The
+                // published Ld/Le/Ln are cleared too: they are indices OF the
+                // current day, and carrying yesterday's value into today reads
+                // as if the period had already been measured. A period with no
+                // data yet reports 0 and stays out of Lden (see below).
+                if (last_mday_ != -1 && last_mday_ != timeinfo.tm_mday) {
+                    day_.reset(); evening_.reset(); night_.reset();
+                    last_.Ld = 0.0f; last_.Le = 0.0f; last_.Ln = 0.0f;
+                    last_.noiseLden = 0.0f;
+                }
+                last_mday_ = timeinfo.tm_mday;
+
                 int h = timeinfo.tm_hour;
                 if (h >= 7 && h < 19)       day_.add(laeq);
                 else if (h >= 19 && h < 23) evening_.add(laeq);
@@ -130,10 +144,6 @@ bool NoiseAggregator::process(const SecondInput &in, SensorData &out, uint8_t &m
                     last_.noiseLden = 10.0f * log10f(e);
                 }
 
-                if (last_mday_ != -1 && last_mday_ != timeinfo.tm_mday) {
-                    day_.reset(); evening_.reset(); night_.reset();
-                }
-                last_mday_ = timeinfo.tm_mday;
             }
         }
     }

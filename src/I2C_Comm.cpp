@@ -25,9 +25,41 @@ uint8_t cachedMicOk = 0;
 // NVS-backed calibration offset (dB). Loaded at init, updated by CMD_SET_CALIB.
 static Preferences prefs;
 static volatile float calib_offset_db = 0.0f;
+// Set by the I2C callback, cleared by I2C_Comm_Service() in task context.
+static volatile uint8_t calib_dirty = 0;
+// #R1 Pending wall clock from CMD_SET_TIME_LEGACY. The callback only stores
+// the epoch and raises the flag: settimeofday() takes newlib locks and must
+// not run in the I2C slave callback context, so it is applied in task context.
+static volatile uint32_t pending_epoch = 0;
+static volatile uint8_t time_dirty = 0;
+
+static volatile uint8_t meta_node_type = 0x00;
+static volatile uint8_t meta_time_synced = 0;
+static volatile uint16_t meta_clip_count = 0;
 
 float I2C_Comm_GetCalibOffset() {
     return calib_offset_db;
+}
+
+void I2C_Comm_Service() {
+    // #R1 apply a pending clock set here, never in the I2C callback.
+    if (time_dirty) {
+        time_dirty = 0;
+        uint32_t ts = pending_epoch;
+        struct timeval tv = {(long)ts, 0};
+        settimeofday(&tv, NULL);
+        meta_time_synced = 1; // #5: enable Ld/Le/Ln computation
+        Serial.printf("[TIME] Clock set from master: epoch %lu (local)\n",
+                      (unsigned long)ts);
+    }
+
+    if (!calib_dirty) return;
+    calib_dirty = 0;
+    float v = calib_offset_db;
+    prefs.begin("noise", false);
+    prefs.putFloat("calib_db", v);
+    prefs.end();
+    Serial.printf("[CALIB] Offset saved to NVS: %.2f dB\n", v);
 }
 
 // Guards cachedSensorData/cachedMicOk: I2C_Comm_Sync (task context) copies the
@@ -41,9 +73,6 @@ static portMUX_TYPE cacheMux = portMUX_INITIALIZER_UNLOCKED;
 static volatile uint8_t data_ready = 0;
 
 // #12/#5 node metadata, updated by the node firmware and by the set-time path.
-static volatile uint8_t meta_node_type = 0x00;
-static volatile uint8_t meta_time_synced = 0;
-static volatile uint16_t meta_clip_count = 0;
 
 void I2C_Comm_SetNodeType(uint8_t node_type) {
     meta_node_type = node_type;
@@ -86,23 +115,30 @@ void receiveEvent(int bytes) {
         for (int i = 0; i < 4 && Wire.available(); i++) {
             p[i] = Wire.read();
         }
-        struct timeval tv = {(long)timestamp, 0};
-        settimeofday(&tv, NULL);
-        meta_time_synced = 1; // #5: enable Ld/Le/Ln computation
+        // #R1 defer the clock set to task context (see pending_epoch above).
+        // The master sends LOCAL epoch: the node applies no timezone, so the
+        // day/evening/night bands follow exactly what the master sends.
+        pending_epoch = timestamp;
+        time_dirty = 1;
     }
 
     // Persistent calibration: 0x0A + int16 LE (hundredths of dB).
-    // Writing NVS from the I2C callback is acceptable here — it happens only on
-    // an explicit, rare calibration command, not in the hot path.
+    // The value is applied immediately, but the NVS write is DEFERRED: flash
+    // erase/write blocks for tens of ms and must never run inside the I2C
+    // slave callback (it would stall responses to the master). The aggregator
+    // task calls I2C_Comm_Service() once per second to flush it.
     if (cmd == CMD_SET_CALIB && bytes == 3) {
         int16_t raw = 0;
         uint8_t *p = (uint8_t *)&raw;
         if (Wire.available()) p[0] = Wire.read();
         if (Wire.available()) p[1] = Wire.read();
-        calib_offset_db = raw / 100.0f;
-        prefs.begin("noise", false);
-        prefs.putFloat("calib_db", calib_offset_db);
-        prefs.end();
+        float v = raw / 100.0f;
+        // Range check: a corrupted byte must not persist an absurd offset that
+        // would survive reboots and silently ruin every reading.
+        if (v >= CALIB_OFFSET_MIN_DB && v <= CALIB_OFFSET_MAX_DB) {
+            calib_offset_db = v;
+            calib_dirty = 1; // flushed to NVS by the aggregator task
+        }
     }
 
     while (Wire.available()) {

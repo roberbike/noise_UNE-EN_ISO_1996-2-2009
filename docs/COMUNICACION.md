@@ -100,6 +100,36 @@ Definidos en [src/I2C_Comm.h](../src/I2C_Comm.h):
 
 En segundos inválidos el esclavo conserva los últimos valores válidos en la estructura (nunca publica ceros); la señal de invalidez es exclusivamente el status.
 
+**Regla del formato de cable: sólo se añade al final.** Los maestros mantienen
+su propia copia de `SensorData` y la leen como un bloque de bytes, así que el
+desplazamiento de cada campo forma parte del protocolo. Un campo nuevo va
+**siempre al final**: insertarlo en medio desplaza todo lo posterior y un
+maestro con la definición antigua no falla, sino que lee valores equivocados en
+silencio. Un maestro que pida sólo el tamaño antiguo (68 bytes) sigue
+recibiendo exactamente el layout que espera. Hay `static_assert` en
+`DSP_Engine.h` que rompen la compilación si alguien inserta un campo en medio.
+
+**Hora: la envía el maestro en epoch LOCAL.** El nodo **no aplica ninguna zona
+horaria**: toma el epoch recibido por `CMD_SET_TIME_LEGACY` (0x09 + 4 bytes LE)
+tal cual, y de ahí salen directamente las franjas día (7-19 h), tarde (19-23 h)
+y noche (23-7 h). Por tanto el maestro debe enviar **hora local, no UTC** — en
+España UTC+1 en invierno y UTC+2 en verano — y reenviarla tras cada cambio de
+horario. Si se envía UTC, todos los índices Ld/Le/Ln/Lden quedan desplazados
+una o dos horas. El byte `time_synced` de los metadatos confirma que el nodo ya
+tiene hora; hasta entonces Lden permanece en 0. El nodo no aplica el reloj
+dentro del callback I2C: lo difiere a la tarea agregadora (ver §6).
+
+**Semántica real de algunos campos de `SensorData`.** El layout está congelado
+(los maestros lo leen como bloque de bytes), así que varios nombres heredados
+no describen lo que llevan:
+
+| Campo | Nombre sugiere | Lleva realmente |
+| :--- | :--- | :--- |
+| `noiseAvgLegal` | media legal en mV | **L10 en dB** |
+| `noisePeak` / `noisePeakDb` | pico | **LAFmax** (máximo con ponderación Fast, es un RMS) |
+| `noiseMin` / `noiseMinDb` | mínimo | **duplicado de la media** — obsoleto, no usar |
+| `noiseLCpeakDb` | — | el **pico real** (ponderación C, sin constante de tiempo) |
+
 **Metadatos del nodo (`CMD_GET_METADATA`).** Devuelve 9 bytes empaquetados:
 
 | Offset | Campo | Tipo | Significado |

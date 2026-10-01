@@ -34,12 +34,35 @@ Biquad cWeightingFilters[2] = {
     {1.00000000f, -2.00000000f, 1.00000000f, -1.99461446f, 0.99462171f, 0, 0}
 };
 #else
-// 16 kHz (default). Nyquist at 8 kHz; matches the original coefficient set.
+// 16 kHz. The 12194 Hz pole of the analog A prototype sits above Nyquist, so a
+// plain bilinear transform collapses it and the response falls off far too
+// early: -1.5 dB at 5 kHz, -5.7 at 6.3 kHz, -12.2 at 7 kHz against the IEC
+// 61672-1 curve. The first two sections (poles at 20.6/107.7/737.9 Hz) are
+// exact and kept; the third is fitted by least squares over 20 Hz-7.9 kHz,
+// which brings the whole band within +-0.15 dB. Poles |z| = 0.25 and 0.30,
+// comfortably stable. Normalized to 0 dB at 1 kHz, so the existing
+// CALIBRATION_RMS_MV (measured with a 1 kHz calibrator) stays valid.
+//
+// Trade-off: the old third section happened to have a zero at Nyquist, which
+// masked aliasing from 8-9 kHz (the ADC has no analog anti-alias filter). The
+// fitted one does not. For urban/traffic spectra only ~1.3 % of A-weighted
+// energy lies above 8 kHz, so the net effect is a clear gain; for hiss-heavy
+// sources it is less clear-cut. Fit an RC low-pass (~8 kHz) at the MAX4466
+// output to remove the issue at the source, or build with
+// -D A_WEIGHT_LEGACY_16K to restore the previous coefficients.
+#ifdef A_WEIGHT_LEGACY_16K
 Biquad aWeightingFilters[3] = {
     {0.529093f, -1.058186f, 0.529093f, -1.983887f, 0.983952f, 0, 0},
     {1.000000f, -2.000000f, 1.000000f, -1.705510f, 0.715988f, 0, 0},
     {1.000000f, 2.000000f, 1.000000f, 0.821564f, 0.168742f, 0, 0}
 };
+#else
+Biquad aWeightingFilters[3] = {
+    {0.529093f, -1.058186f, 0.529093f, -1.983887f, 0.983952f, 0, 0},
+    {1.000000f, -2.000000f, 1.000000f, -1.705510f, 0.715988f, 0, 0},
+    {-0.36654287f, 1.61495515f, 0.72597221f, 0.05375630f, -0.07418460f, 0, 0}
+};
+#endif
 // C-weighting @ 16 kHz. Verified vs IEC 61672-1: |err| < 0.6 dB up to 4 kHz.
 Biquad cWeightingFilters[2] = {
     {0.49718768f, 0.99437536f, 0.49718768f, 0.82156382f, 0.16874178f, 0, 0},

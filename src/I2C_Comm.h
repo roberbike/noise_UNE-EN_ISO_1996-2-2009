@@ -62,8 +62,16 @@
 // level. Payload: 1 cmd byte + 2 bytes int16 little-endian.
 #define CMD_SET_CALIB 0x0A
 
+// Accepted range for that offset. A single corrupted byte on the bus must not
+// persist an absurd value into NVS, where it would survive reboots and bias
+// every reading from then on. Values outside the range are ignored.
+#define CALIB_OFFSET_MIN_DB (-30.0f)
+#define CALIB_OFFSET_MAX_DB (30.0f)
+
+// Reported by CMD_GET_METADATA. This was still 3.2.1 in the 3.3.0 release, so
+// a master asking which firmware a node runs got the wrong answer.
 #define FW_VERSION_MAJOR 3
-#define FW_VERSION_MINOR 2
+#define FW_VERSION_MINOR 3
 #define FW_VERSION_PATCH 1
 
 // Returned by CMD_GET_METADATA. Packed for a stable wire layout.
@@ -110,5 +118,12 @@ bool I2C_Comm_TimeSynced();
 // (typically by feeding it into the amplitude->dB conversion). Returns 0.0 if
 // never calibrated.
 float I2C_Comm_GetCalibOffset();
+
+// Applies work deferred by the I2C callback: a pending clock set
+// (CMD_SET_TIME_LEGACY) and a pending calibration write to NVS. Must be called
+// from task context — the aggregator task calls it once per second. The
+// callback only stores values and raises flags; it never writes flash nor
+// calls settimeofday(), neither of which is safe in that context.
+void I2C_Comm_Service();
 
 #endif // I2C_COMM_H
