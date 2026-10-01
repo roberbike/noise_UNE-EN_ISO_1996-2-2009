@@ -26,6 +26,7 @@
 
 #include "DSP_Engine.h"
 #include "I2C_Comm.h"
+#include "NodeLog.h"
 #include "NoiseAggregator.h"
 
 /**
@@ -71,8 +72,11 @@ struct RawSecondData {
 };
 QueueHandle_t timerToTaskQueue;
 
+// #R3 Routed through the deferred log queue: the UART write happens in the
+// loop task, which the sampling task can preempt, instead of inside the
+// high-priority aggregator where it stalled sampling for ~9.5 ms every second.
 void SerialLog(const char *level, const char *msg) {
-    Serial.printf("[%s] %s\n", level, msg);
+    NodeLog_Msg(level, msg);
 }
 
 bool check_microphone_connection(uint32_t bias_mv) {
@@ -226,7 +230,7 @@ void aggregator_task(void *pvParameters) {
             I2C_Comm_SetClipCount((uint16_t)secData.clip_count); // #B4 metadata
 
             if (valid) {
-                Serial.printf("[SMART] LAeq:%.1f | LAFmx:%.1f | LASmx:%.1f | LCpk:%.1f | L10:%.1f | L90:%d | Lden:%.1f | cyc:%u\n",
+                NodeLog_Printf("[SMART] LAeq:%.1f | LAFmx:%.1f | LASmx:%.1f | LCpk:%.1f | L10:%.1f | L90:%d | Lden:%.1f | cyc:%u\n",
                               out.noiseAvgDb, out.noisePeakDb, out.noiseLASmaxDb,
                               out.noiseLCpeakDb, out.noiseAvgLegalDb,
                               out.lowNoiseLevel, out.noiseLden,
@@ -258,6 +262,7 @@ void aggregator_task(void *pvParameters) {
 void ruido_setup() {
     Serial.begin(115200);
     delay(1000);
+    NodeLog_Init(); // #R3 deferred logging; must precede the tasks
     SerialLog("INIT", "Smart City Noise Sensor - ESP32-C3 + MAX4466 (ADC)");
 
     dataQueue = xQueueCreate(1, sizeof(I2cPayloadMessage));
@@ -323,5 +328,10 @@ void loop() {
     // Deleting a subscribed task without unsubscribing first is undefined
     // behaviour, so detach it and then park the task instead of deleting it.
     esp_task_wdt_delete(NULL);
-    vTaskDelay(portMAX_DELAY);
+    // #R3 Instead of parking, this low-priority task drains the log queue, so
+    // the blocking UART writes happen where the sampling task can preempt
+    // them. NodeLog_Pump() blocks on the queue, so this does not spin.
+    while (1) {
+        NodeLog_Pump();
+    }
 }

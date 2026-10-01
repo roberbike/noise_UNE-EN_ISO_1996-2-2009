@@ -13,6 +13,107 @@ out: the master sends LOCAL epoch and the node applies no timezone of its own.
 
 ### Added
 
+- **A5 · CRC-16 al final de `SensorData`** (CCITT-FALSE, polinomio 0x1021,
+  semilla 0xFFFF, sobre los 84 bytes anteriores; el struct pasa de 76 a 88
+  bytes, siempre añadiendo por el final). Las guardas de offset cubren un
+  struct desplazado y `cycles` cubre un nodo congelado, pero una trama
+  corrompida en tránsito puede llegar con `status = 1` y un `cycles` que
+  avanza y pasaría ambas. El nodo lo calcula en cada lectura, así que cubre
+  también los campos de retención; el maestro de ejemplo lo verifica y
+  descarta la trama si no cuadra. Verificado contra el vector estándar
+  (`"123456789"` → 0x29B1) en las dos implementaciones, y detecta los 672
+  errores de un bit de la región cubierta. `cycles` queda documentado como el
+  número de secuencia, que ya cumplía esa función.
+- **A7 · `noiseLASmaxHoldDb` y `noiseLCpeakHoldDb`**: máximos **desde la
+  lectura anterior del maestro**, reiniciados por ella. Los campos de siempre
+  son máximos del último segundo, así que el maestro de ejemplo, sondeando
+  cada 5 s, descartaba cuatro segundos de cada cinco precisamente en los dos
+  indicadores creados para el ruido impulsivo. Con los nuevos no se pierde
+  ningún evento sea cual sea el periodo de sondeo; tras reiniciarse llevan el
+  valor del último segundo, nunca 0. `REQUEST_INTERVAL_MS` del ejemplo baja de
+  5000 a 1000 ms, que es la cadencia de agregación del nodo.
+- **`lden_periods` / `lden_minutes` en los metadatos** (que pasan de 13 a 16
+  bytes): el nodo publica Lden desde el primer segundo válido, así que a las
+  07:00:02 ya hay un "Lden (24 h)" con dos segundos de día. Ahora el maestro
+  sabe qué franjas tienen datos y cuántos minutos se han acumulado, igual que
+  `window_fill` ya hacía para L10/L90.
+
+### Fixed
+
+- **A2 · Faltaban 3,0103 dB en el nodo digital (pico frente a RMS).** El
+  datasheet del ICS-43434 especifica la sensibilidad sobre el **pico** de una
+  senoide (94 dB SPL "peaks at −26 dB below full scale"), y el código le pasa
+  una amplitud **RMS**; para una senoide difieren en 20·log₁₀(√2). La prueba
+  decisiva es el punto de sobrecarga acústica: el datasheet da AOP = 120 dB SPL
+  y sensibilidad −26 dBFS, que se diferencian **exactamente** en 26 dB, y eso
+  solo es consistente si el fondo de escala lo alcanza el pico de la senoide de
+  120 dB. Leído como RMS, esa senoide necesitaría un pico de 1,414 y habría
+  recortado 3 dB antes del AOP especificado. Comprobado: con la constante
+  corregida una senoide con el pico a fondo de escala se mide en 120,00 dB
+  (antes 116,99). **Consecuencia: todas las magnitudes del nodo digital suben
+  3,01 dB.** Los umbrales del comentario #B5 se recalculan en consecuencia
+  (1e-5 FS pasa de 20,0 a 23,0 dB SPL; el suelo del micrófono queda en
+  33-37 dB SPL).
+- **A1 · `MIC_OFFSET_DB` vuelve a 0.** El ⋅10,7 dB del nodo digital era un
+  parche de campo heredado: estaba compensando —y de más— el error de 3,01 dB
+  de A2, y 10,7 dB es diez veces la tolerancia ±1 dB del ICS-43434, así que no
+  podía ser dispersión de la pieza. Con la constante del datasheet ya correcta,
+  la conversión da el nivel bueno por sí sola y el trim de compilación no hace
+  falta. Para un ajuste por unidad lo correcto es `CMD_SET_CALIB` (0x0A), que
+  persiste en NVS y no obliga a reflashear.
+
+  > **ATENCIÓN, esto mueve los niveles publicados.** Entre A2 (+3,01) y este
+  > cambio (+10,7), el nodo digital pasa a leer **+13,71 dB** respecto a
+  > v3.3.0. Un calibrador de 94,0 dB leía 80,29 dB y ahora lee 94,00. La serie
+  > histórica del nodo S3 en Grafana tendrá un escalón de 13,71 dB en el
+  > momento del flasheo: hay que anotarlo, y los datos anteriores de ese nodo
+  > no son comparables con los posteriores sin sumarles esos 13,71 dB. El nodo
+  > analógico (C3/MAX4466) **no** se ve afectado: su cadena de calibración es
+  > independiente y no cambia.
+
+  Comprobación sin sonómetro, con un calibrador de 94,0 dB: el campo `raw
+  noise` debe salir en ~35 400 µFS — es independiente del trim y de la
+  constante, así que valida la extracción de los 24 bits del I2S— y el LAeq
+  en ~94,0 dB. Si el raw sale muy distinto de 35 400, el problema no es ninguna
+  de las dos cosas sino el desplazamiento de bits.
+- **R3 · Muestreo no uniforme en el C3.** El agregador corre a prioridad alta y
+  llamaba a `Serial.printf()` directamente; a 115200 baudios esa línea de
+  estado son ~110 caracteres, es decir ~9,5 ms de escritura bloqueante que
+  desalojaban a la tarea de muestreo una vez por segundo. Las muestras no se
+  perdían —el bucle recupera desde `next_sample_time`— pero llegaban en
+  ráfaga al final, y una ráfaga no es muestreo uniforme: sin filtro antialias
+  analógico delante del ADC eso es error de medida, no solo jitter. Nuevo
+  módulo `NodeLog`: el agregador solo formatea la línea en una cola (sin E/S,
+  sin bloqueo) y la tarea `loop()` —prioridad 1, por debajo del muestreo— hace
+  la escritura, que ahora sí es desalojable. Una cola llena **descarta** la
+  línea: un log nunca debe retrasar una medida. De paso `loop()` deja de estar
+  aparcada y hace algo útil, sin dejar de bloquearse en vez de girar en vacío.
+- **Nit · `window_fill` se congelaba en rachas de segundos inválidos**, porque
+  solo se publicaba dentro de la puerta de validez. Ahora se recalcula y se
+  publica cada segundo: durante una racha el recuento baja de verdad conforme
+  los centinelas entran en la ventana, que es exactamente lo que había que
+  poder ver.
+- `docs/RAMA_48KHZ.md`, `docs/COMUNICACION.md` y el README del ejemplo
+  actualizados: trama de 88 bytes, metadatos de 16, CRC, campos de retención y
+  el aviso de que `setNodeTime()` viene comentado, así que tal cual el ejemplo
+  deja `time_synced = 0` y Ld/Le/Ln/Lden en 0 de por vida.
+
+### Documentación
+
+- El comentario del filtro C a 16 kHz recoge ahora el **trade-off de
+  aliasado**, que faltaba. Son filtros digitales: actúan después del muestreo,
+  así que ponderan una componente aliasada a la frecuencia en la que
+  **aparece**, no a la que traía. El desplome del filtro antiguo enmascaraba el
+  alias como efecto colateral (lo que pliega desde 9-11 kHz cae en 5-7 kHz,
+  donde la cascada rota atenuaba entre 1,5 y 12 dB), y una cascada exacta lo
+  pasa con casi todo su peso. Pega más fuerte en C que en A porque C es
+  prácticamente plana entre 2 y 8 kHz y porque LCpeak es un pico: un solo
+  impulso aliasado lo mueve. El arreglo es hardware —RC a ~8 kHz en la salida
+  del MAX4466—, no coeficientes; enmascarar un error de medida con otro error
+  de medida no era una alternativa defendible.
+
+### Added
+
 - **`window_fill` / `window_size` en los metadatos** (`CMD_GET_METADATA`, que
   pasa de 9 a 13 bytes, añadiendo por el final). Un master no tenía forma de
   distinguir un L10/L90 calculado sobre 12 segundos de uno sobre los 300 de la

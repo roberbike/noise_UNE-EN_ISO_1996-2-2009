@@ -24,7 +24,13 @@
  */
 
 #define SLAVE_ADDR 0x08
-#define REQUEST_INTERVAL_MS 5000
+// #A7 One second, matching the node's aggregation period. At the previous
+// 5000 ms this example read one second in five and the per-second LASmax and
+// LCpeak it printed described only the second before each read, discarding the
+// other four — in an indicator whose whole purpose is catching impulses. The
+// hold fields now make a slower period safe, but polling at the aggregation
+// rate is still what you want for impulsive noise.
+#define REQUEST_INTERVAL_MS 1000
 
 #if defined(CONFIG_IDF_TARGET_ESP32S2)
 #define I2C_SDA 8
@@ -68,6 +74,13 @@ struct SensorData {
   // CanAirIO and other existing masters still use. Keep them last.
   float noiseLASmaxDb;
   float noiseLCpeakDb;
+  // Appended in 3.3.1: maxima since THIS master's previous read, reset by it.
+  // Use these, not the per-second fields above, unless you poll every second:
+  // the per-second ones only describe the last second before your read.
+  float noiseLASmaxHoldDb;
+  float noiseLCpeakHoldDb;
+  uint16_t crc16;      // CRC-16/CCITT-FALSE over the 84 bytes before it
+  uint16_t reserved;
 };
 
 // Offset guards. THIS is what was missing when 3.3.0 moved two fields: both
@@ -78,7 +91,21 @@ static_assert(offsetof(SensorData, noiseAvgDb)   ==  8, "layout: noiseAvgDb move
 static_assert(offsetof(SensorData, lowNoiseLevel) == 44, "layout: lowNoiseLevel moved");
 static_assert(offsetof(SensorData, cycles)        == 48, "layout: cycles moved");
 static_assert(offsetof(SensorData, noiseLden)     == 64, "layout: noiseLden moved");
-static_assert(sizeof(SensorData) == 76, "layout: unexpected SensorData size");
+static_assert(offsetof(SensorData, crc16)         == 84, "layout: crc16 moved");
+static_assert(sizeof(SensorData) == 88, "layout: unexpected SensorData size");
+
+// Same polynomial and seed the node uses (CRC-16/CCITT-FALSE).
+static uint16_t frameCrc16(const void *data, size_t len) {
+  const uint8_t *p = (const uint8_t *)data;
+  uint16_t crc = 0xFFFF;
+  for (size_t i = 0; i < len; i++) {
+    crc ^= (uint16_t)p[i] << 8;
+    for (int b = 0; b < 8; b++) {
+      crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021) : (uint16_t)(crc << 1);
+    }
+  }
+  return crc;
+}
 
 // Reference helper: push a persistent calibration offset (dB) to the node.
 // The node stores it in NVS (survives reboots) and applies it to every level.
@@ -181,6 +208,17 @@ void loop() {
         p[i] = Wire.read();
       }
 
+      // --- Integrity (#A5) ---
+      // Checked BEFORE anything else: a frame corrupted in transit can still
+      // carry an advancing `cycles` and a status of 1, so freshness checks
+      // alone would happily publish it.
+      uint16_t crc_calc = frameCrc16(&data, offsetof(SensorData, crc16));
+      bool crc_ok = (crc_calc == data.crc16);
+      if (!crc_ok) {
+        Serial.printf("CRC mismatch: got 0x%04X, computed 0x%04X - frame dropped\n",
+                      data.crc16, crc_calc);
+      }
+
       // --- Triple freshness validation (see docs/COMUNICACION.md) ---
       // Complete read alone is NOT enough: the ESP32 I2C slave HAL may pad a
       // short reply to full length. Require status==1 AND cycles advancing;
@@ -188,7 +226,7 @@ void loop() {
       static uint32_t last_cycles = 0;
       static bool have_last = false;
       bool fresh = (data.cycles != last_cycles) || !have_last;
-      bool publishable = (status == 1) && fresh;
+      bool publishable = crc_ok && (status == 1) && fresh;
       last_cycles = data.cycles;
       have_last = true;
 
@@ -198,8 +236,10 @@ void loop() {
                     (publishable ? "PUBLISH" : "SKIP (stale/not ready)"));
       Serial.printf("LAeq (1s): %.2f dB\n", data.noiseAvgDb);
       Serial.printf("LAFmax (1s): %.2f dB\n", data.noisePeakDb);
-      Serial.printf("LASmax (1s): %.2f dB\n", data.noiseLASmaxDb);
-      Serial.printf("LCpeak: %.2f dB\n", data.noiseLCpeakDb);
+      Serial.printf("LASmax (1s): %.2f dB | since last read: %.2f dB\n",
+                    data.noiseLASmaxDb, data.noiseLASmaxHoldDb);
+      Serial.printf("LCpeak (1s): %.2f dB | since last read: %.2f dB\n",
+                    data.noiseLCpeakDb, data.noiseLCpeakHoldDb);
       Serial.printf("L10 (Legal): %.2f dB\n", data.noiseAvgLegalDb);
       Serial.printf("L90 (Backg): %u\n", data.lowNoiseLevel);
       Serial.printf("Lden (24h): %.2f dB\n", data.noiseLden);
@@ -216,13 +256,14 @@ void loop() {
 
       // #12: optional metadata read. The frame grew by appending, so read the
       // longest known length and accept a shorter reply from an older node:
-      // 7 bytes originally, 9 with the calibration offset, 13 since 3.3.1
-      // with the L10/L90 window fill. Never hard-code one length.
+      // 7 bytes originally, 9 with the calibration offset, 16 since 3.3.1
+      // with the L10/L90 window fill and the Lden accumulation. Never
+      // hard-code one length.
       Wire.beginTransmission(SLAVE_ADDR);
       Wire.write(CMD_GET_METADATA);
       if (Wire.endTransmission() == 0) {
         delay(5);
-        uint8_t m[13] = {0};
+        uint8_t m[16] = {0};
         int got = Wire.requestFrom((uint16_t)SLAVE_ADDR, (size_t)sizeof(m));
         if (got >= 7) {
           for (int i = 0; i < got && i < (int)sizeof(m); i++) m[i] = Wire.read();
@@ -241,6 +282,17 @@ void loop() {
             // Treat L10/L90 as provisional until the window has filled.
             Serial.printf("      L10/L90 window: %u/%u s%s\n", fill, wsize,
                           (wsize && fill < wsize) ? "  (PARTIAL)" : "");
+          }
+          if (got >= 16) {
+            uint8_t per = m[13];
+            uint16_t mins = (uint16_t)m[14] | ((uint16_t)m[15] << 8);
+            // Same caution for Lden: it is published from the first valid
+            // second, so check what it actually rests on before storing it as
+            // a 24 h index.
+            Serial.printf("      Lden rests on: %s%s%s %u min%s\n",
+                          (per & 0x01) ? "D" : "-", (per & 0x02) ? "E" : "-",
+                          (per & 0x04) ? "N" : "-", mins,
+                          (per != 0x07) ? "  (INCOMPLETE DAY)" : "");
           }
         }
       }

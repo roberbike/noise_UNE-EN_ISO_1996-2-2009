@@ -75,6 +75,9 @@ bool NoiseAggregator::process(const SecondInput &in, SensorData &out, uint8_t &m
         last_.noiseMinDb = laeq;
         last_.noiseLASmaxDb = lasmax;
         last_.noiseLCpeakDb = lcpeak;
+        // #A7 Feed the hold latches so a slow-polling master still sees the
+        // peak of every second between its reads, not just the last one.
+        I2C_Comm_AccumulateImpulsive(lasmax, lcpeak);
 
         // Linear-amplitude fields, scaled to per-node integer-friendly units:
         // mV for ADC (int_scale=1), µFS for I2S (int_scale=1e6). Without the
@@ -103,7 +106,7 @@ bool NoiseAggregator::process(const SecondInput &in, SensorData &out, uint8_t &m
             // How full the window is, for the master: a percentile over 12 s
             // is not the same statistic as one over 300 s, and until now there
             // was no way to tell the two apart from the bus.
-            I2C_Comm_SetWindowFill((uint16_t)n, (uint16_t)AGG_WINDOW_SEC);
+            win_valid_ = n;
 
             if (n > 0) {
                 // L10 = level exceeded 10% of the time = 90th percentile by
@@ -175,10 +178,30 @@ bool NoiseAggregator::process(const SecondInput &in, SensorData &out, uint8_t &m
                 last_.noiseLden = (hours > 0.0f) ? 10.0f * log10f(num / hours)
                                                  : 0.0f;
 
+                // Tell the master how little (or much) this Lden rests on.
+                uint8_t mask = (uint8_t)((day_.hasData() ? 0x01 : 0) |
+                                         (evening_.hasData() ? 0x02 : 0) |
+                                         (night_.hasData() ? 0x04 : 0));
+                uint32_t secs = day_.count + evening_.count + night_.count;
+                uint32_t mins = secs / 60u;
+                I2C_Comm_SetLdenProgress(mask, (uint16_t)(mins > 65535u ? 65535u : mins));
+
             }
         }
     }
     // Invalid second: last_ keeps its previous values (hold-last-valid).
+
+    // Reported every second, valid or not: during a run of invalid seconds the
+    // count really does fall as the sentinels age in, and freezing the last
+    // computed value would hide exactly that.
+    if (!valid) {
+        int n = 0;
+        for (int i = 0; i < win_count_; i++) {
+            if (WIN_IS_VALID(win_buffer_[i])) n++;
+        }
+        win_valid_ = n;
+    }
+    I2C_Comm_SetWindowFill((uint16_t)win_valid_, (uint16_t)AGG_WINDOW_SEC);
 
     last_.cycles++;
     out = last_;

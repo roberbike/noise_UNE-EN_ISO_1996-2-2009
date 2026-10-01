@@ -38,6 +38,15 @@ static volatile uint8_t meta_time_synced = 0;
 static volatile uint16_t meta_clip_count = 0;
 static volatile uint16_t meta_window_fill = 0;
 static volatile uint16_t meta_window_size = 0;
+static volatile uint8_t meta_lden_periods = 0;
+static volatile uint16_t meta_lden_minutes = 0;
+
+// #A7 Impulsive hold latches. Written by the aggregator every valid second and
+// by requestEvent when a read consumes them, so they are guarded by the same
+// spinlock as the cached struct (declared below, used after its definition).
+static float hold_lasmax_db = 0.0f;
+static float hold_lcpeak_db = 0.0f;
+static bool  hold_primed = false;
 
 float I2C_Comm_GetCalibOffset() {
     return calib_offset_db;
@@ -74,6 +83,19 @@ static portMUX_TYPE cacheMux = portMUX_INITIALIZER_UNLOCKED;
 // so protocol-following masters never publish the boot-time zeroed struct.
 static volatile uint8_t data_ready = 0;
 
+void I2C_Comm_AccumulateImpulsive(float lasmax_db, float lcpeak_db) {
+    portENTER_CRITICAL_SAFE(&cacheMux);
+    if (!hold_primed) {
+        hold_lasmax_db = lasmax_db;
+        hold_lcpeak_db = lcpeak_db;
+        hold_primed = true;
+    } else {
+        if (lasmax_db > hold_lasmax_db) hold_lasmax_db = lasmax_db;
+        if (lcpeak_db > hold_lcpeak_db) hold_lcpeak_db = lcpeak_db;
+    }
+    portEXIT_CRITICAL_SAFE(&cacheMux);
+}
+
 // #12/#5 node metadata, updated by the node firmware and by the set-time path.
 
 void I2C_Comm_SetNodeType(uint8_t node_type) {
@@ -82,6 +104,13 @@ void I2C_Comm_SetNodeType(uint8_t node_type) {
 
 void I2C_Comm_SetClipCount(uint16_t clip_count) {
     meta_clip_count = clip_count;
+}
+
+void I2C_Comm_AccumulateImpulsive(float lasmax_db, float lcpeak_db);
+
+void I2C_Comm_SetLdenProgress(uint8_t periods_mask, uint16_t minutes) {
+    meta_lden_periods = periods_mask;
+    meta_lden_minutes = minutes;
 }
 
 void I2C_Comm_SetWindowFill(uint16_t valid_seconds, uint16_t window_size) {
@@ -179,7 +208,19 @@ void requestEvent() {
     portENTER_CRITICAL_SAFE(&cacheMux);
     snap = cachedSensorData;
     status = (data_ready && cachedMicOk) ? 1 : 0;
+    // #A7 Report the maxima accumulated since the previous read, then rearm
+    // the latches at this second's values so they are never left reporting 0.
+    snap.noiseLASmaxHoldDb = hold_primed ? hold_lasmax_db : snap.noiseLASmaxDb;
+    snap.noiseLCpeakHoldDb = hold_primed ? hold_lcpeak_db : snap.noiseLCpeakDb;
+    if (cmd == CMD_GET_DATA) {
+        hold_lasmax_db = snap.noiseLASmaxDb;
+        hold_lcpeak_db = snap.noiseLCpeakDb;
+    }
     portEXIT_CRITICAL_SAFE(&cacheMux);
+
+    // #A5 Stamp the integrity field last, so it covers the hold values too.
+    snap.reserved = 0;
+    snap.crc16 = sensordata_crc16(&snap, SENSORDATA_CRC_LEN);
 
     float laeq = snap.noiseAvgDb;
     float lafmax = snap.noisePeakDb;
@@ -199,7 +240,8 @@ void requestEvent() {
                 FW_VERSION_MAJOR, FW_VERSION_MINOR, FW_VERSION_PATCH,
                 meta_node_type, meta_time_synced, meta_clip_count,
                 (int16_t)lroundf(calib_offset_db * 100.0f),
-                meta_window_fill, meta_window_size
+                meta_window_fill, meta_window_size,
+                meta_lden_periods, meta_lden_minutes
             };
             Wire.write((uint8_t *)&meta, sizeof(NodeMetadata));
             break;

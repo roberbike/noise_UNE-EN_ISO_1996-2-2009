@@ -24,6 +24,7 @@
 
 #include "DSP_Engine.h"
 #include "I2C_Comm.h"
+#include "NodeLog.h"
 #include "MIC_I2S.h"
 #include "NoiseAggregator.h"
 
@@ -31,8 +32,11 @@
  * --- XIAO ESP32-S3 + ICS-43434 NOISE MONITOR (I2S) ---
  * I2S digital MEMS front-end; the per-second acoustic math lives in the shared
  * NoiseAggregator (same code path as the ADC node in main.cpp). Level comes
- * from dBFS via the mic sensitivity spec (-26 dBFS @ 94 dB SPL); MIC_OFFSET_DB
- * allows an optional field trim against a reference meter.
+ * from dBFS via the mic sensitivity spec (-26 dBFS @ 94 dB SPL, peak -> RMS
+ * corrected, see MIC_PEAK_TO_RMS_DB). MIC_OFFSET_DB is a compile-time trim and
+ * starts at 0: the conversion is correct on its own, so a node needs no trim
+ * to read the right level. For a per-unit adjustment prefer CMD_SET_CALIB,
+ * which persists in NVS and needs no reflash.
  */
 
 #ifndef MIC_OFFSET_DB
@@ -43,13 +47,14 @@
 #define WARMUP_MS 500              // mic power-up + IIR transient
 #define WDT_TIMEOUT_S 5
 
-// #4 disconnection threshold. Corrected figures (#B5): with the sensitivity
-// conversion used here, 1e-5 FS is 20.0 dB SPL — not 30 dBA as previously
-// commented. The mic's own noise floor (30 dBA spec, ~34 dB measured) sits at
-// 3.2e-5..5.0e-5 FS, so this threshold stays ~14 dB below it: low enough never
-// to fire on the real floor, high enough to catch a dead SD line (which reads
-// orders of magnitude lower). The previous 1e-6 FS was 0 dB SPL and never
-// triggered at all.
+// #4 disconnection threshold. Figures with the corrected conversion (#B5,
+// #A2), before any MIC_OFFSET_DB trim: 1e-5 FS is 23.0 dB SPL — not 30 dBA as
+// originally commented, and 3 dB higher than the 20.0 dB stated before the
+// peak-vs-RMS fix. The mic's own noise floor (30 dBA spec) sits at
+// 3.2e-5..5.0e-5 FS, i.e. 33..37 dB SPL, so this threshold stays ~10-14 dB
+// below it: low enough never to fire on the real floor, high enough to catch
+// a dead SD line, which reads orders of magnitude lower. The original 1e-6 FS
+// was 3 dB SPL and never triggered at all.
 #define MIC_MIN_RMS_FS 1e-5f
 
 // #3 max clips tolerated per second before invalidating the reading.
@@ -69,17 +74,41 @@ struct RawSecondData {
 };
 QueueHandle_t timerToTaskQueue;
 
+// #R3 Routed through the deferred log queue: the UART write happens in the
+// loop task, which the sampling task can preempt, instead of inside the
+// high-priority aggregator where it stalled sampling for ~9.5 ms every second.
 void SerialLog(const char *level, const char *msg) {
-    Serial.printf("[%s] %s\n", level, msg);
+    NodeLog_Msg(level, msg);
 }
 
+// #A2 Peak-vs-RMS correction for the sensitivity spec.
+//
+// The ICS-43434 datasheet specifies sensitivity on the PEAK of a sine: 94 dB
+// SPL at 1 kHz "peaks at -26 dB below full scale" (0.05 of full scale). What
+// this code feeds in is an RMS amplitude, and for a sine RMS = peak/sqrt(2),
+// so the two differ by 20*log10(sqrt(2)) = 3.0103 dB.
+//
+// The decisive cross-check is the acoustic overload point. The datasheet gives
+// AOP = 120 dB SPL and sensitivity = -26 dBFS, and those two numbers differ by
+// exactly 26 dB, which is only self-consistent if full scale is reached by the
+// PEAK of a 120 dB SPL sine:
+//   peak(94 dB)  = 10^(-26/20)     = 0.0501 FS
+//   peak(120 dB) = 0.0501 * 10^(26/20) = 1.000 FS   -> full scale, as specified
+// Read as an RMS figure instead, a 120 dB sine would need an RMS of 1.0 and a
+// peak of 1.414, i.e. it would have clipped 3 dB before the stated AOP.
+//
+// Without this term every level from the digital node read 3.01 dB low: a
+// 94.0 dB calibrator measured 91.0 dB (before any trim).
+#define MIC_PEAK_TO_RMS_DB 3.0103f
+
 // Full-scale RMS -> dB SPL for the ICS-43434 (injected into aggregator).
-//   L = 94 + 20*log10(rms_fs) - (-26) + offset
+//   L = 94 + 20*log10(rms_fs) - (-26) + 3.0103 + offsets
 static float i2s_fs_to_db(float rms_fs) {
     // MIC_OFFSET_DB is the compile-time trim; I2C_Comm_GetCalibOffset() adds
     // the NVS field-calibration offset (CMD_SET_CALIB), applied without
     // reflashing.
     return MIC_REF_DB + 20.0f * log10f(rms_fs) - MIC_SENSITIVITY_DBFS
+           + MIC_PEAK_TO_RMS_DB   // #A2 sensitivity is on the peak; this is RMS
            + MIC_OFFSET_DB + I2C_Comm_GetCalibOffset();
 }
 
@@ -212,7 +241,7 @@ void aggregator_task(void *pvParameters) {
                                   : (uint16_t)secData.clip_count); // #12
 
             if (valid) {
-                Serial.printf("[ICS43434] LAeq:%.1f | LAFmx:%.1f | LASmx:%.1f | LCpk:%.1f | L10:%.1f | L90:%d | Lden:%.1f | clip:%u | cyc:%u\n",
+                NodeLog_Printf("[ICS43434] LAeq:%.1f | LAFmx:%.1f | LASmx:%.1f | LCpk:%.1f | L10:%.1f | L90:%d | Lden:%.1f | clip:%u | cyc:%u\n",
                               out.noiseAvgDb, out.noisePeakDb, out.noiseLASmaxDb,
                               out.noiseLCpeakDb, out.noiseAvgLegalDb,
                               out.lowNoiseLevel, out.noiseLden,
@@ -241,6 +270,7 @@ void aggregator_task(void *pvParameters) {
 void ruido_setup() {
     Serial.begin(115200);
     delay(1000);
+    NodeLog_Init(); // #R3 deferred logging; must precede the tasks
     SerialLog("INIT", "Smart City Noise Sensor - XIAO ESP32-S3 + ICS-43434 (I2S)");
 
     dataQueue = xQueueCreate(1, sizeof(I2cPayloadMessage));
@@ -301,5 +331,10 @@ void loop() {
     // Deleting a subscribed task without unsubscribing first is undefined
     // behaviour, so detach it and then park the task instead of deleting it.
     esp_task_wdt_delete(NULL);
-    vTaskDelay(portMAX_DELAY);
+    // #R3 Instead of parking, this low-priority task drains the log queue, so
+    // the blocking UART writes happen where the sampling task can preempt
+    // them. NodeLog_Pump() blocks on the queue, so this does not spin.
+    while (1) {
+        NodeLog_Pump();
+    }
 }

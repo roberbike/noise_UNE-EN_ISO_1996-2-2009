@@ -87,7 +87,7 @@ Definidos en [src/I2C_Comm.h](../src/I2C_Comm.h):
 | :--- | :--- | :--- |
 | `CMD_GET_STATUS` | 0x20 | 1 byte: 1 = OK, 0 = no publicar (ver §6) |
 | `CMD_GET_DATA` | 0x01 | `SensorData` completo empaquetado |
-| `CMD_GET_METADATA` | 0x50 | `NodeMetadata` (13 bytes): versión fw, tipo de nodo, time_synced, clip_count, calib_offset, llenado de la ventana L10/L90 |
+| `CMD_GET_METADATA` | 0x50 | `NodeMetadata` (16 bytes): versión fw, tipo de nodo, time_synced, clip_count, calib_offset, llenado de la ventana L10/L90 |
 | `CMD_SET_CALIB` | 0x0A | Escribe offset de calibración (int16 LE, centésimas de dB); se guarda en NVS |
 | `CMD_IDENTIFY` | — | Identificación del nodo |
 | `CMD_LEGACY_*` | — | Lecturas puntuales simples (compatibilidad) |
@@ -130,9 +130,9 @@ no describen lo que llevan:
 | `noiseMin` / `noiseMinDb` | mínimo | **duplicado de la media** — obsoleto, no usar |
 | `noiseLCpeakDb` | — | el **pico real** (ponderación C, sin constante de tiempo) |
 
-**Metadatos del nodo (`CMD_GET_METADATA`).** Devuelve 13 bytes empaquetados.
+**Metadatos del nodo (`CMD_GET_METADATA`).** Devuelve 16 bytes empaquetados.
 La trama ha crecido **siempre por el final**, igual que `SensorData`: 7 bytes
-en origen, 9 al añadirse la calibración y 13 desde la 3.3.1. Un master debe
+en origen, 9 al añadirse la calibración y 16 desde la 3.3.1. Un master debe
 pedir la longitud más larga que conozca y **aceptar una respuesta más corta**
 de un nodo antiguo, nunca fijar una longitud única:
 
@@ -147,6 +147,8 @@ de un nodo antiguo, nunca fijar una longitud única:
 | 7-8 | calib_offset | int16 LE | Offset de calibración persistente (NVS), centésimas de dB |
 | 9-10 | window_fill | uint16 LE | Segundos válidos que contiene ahora la ventana L10/L90 |
 | 11-12 | window_size | uint16 LE | Longitud de la ventana con la que se compiló (`AGG_WINDOW_SEC`) |
+| 13 | lden_periods | uint8 | Bits: 0 = día con datos, 1 = tarde, 2 = noche |
+| 14-15 | lden_minutes | uint16 LE | Minutos acumulados en los periodos con datos |
 
 **`window_fill` / `window_size`: cuándo fiarse de L10 y L90.** Un percentil
 sobre 12 segundos no es el mismo estadístico que uno sobre 300, y hasta ahora
@@ -158,11 +160,36 @@ segundo de reloj**, válido o no: los segundos inválidos guardan un centinela
 que envejece con normalidad pero queda fuera del percentil, de modo que
 "los últimos 300 s" son 300 s reales y no 300 muestras repartidas en una hora.
 
+**Integridad: CRC-16 al final de la trama (3.3.1).** `SensorData` pasa de 76 a
+88 bytes y los dos últimos útiles son un CRC-16/CCITT-FALSE (polinomio 0x1021,
+semilla 0xFFFF) sobre los 84 bytes anteriores. El nodo lo calcula en cada
+lectura, así que cubre también los campos de retención. Las guardas de layout
+detectan un struct desplazado y `cycles` detecta un nodo congelado, pero una
+trama corrompida en tránsito puede llegar con `status = 1` y un `cycles` que
+avanza, y pasaría las dos comprobaciones: el CRC es lo que la descarta. Un
+maestro que no lo compruebe sigue funcionando igual que antes.
+
+**Ruido impulsivo: `noiseLASmaxHoldDb` y `noiseLCpeakHoldDb`.** Los campos
+`noiseLASmaxDb` y `noiseLCpeakDb` son máximos **del último segundo**. Un
+maestro que sondee cada 5 s ve uno de cada cinco segundos y descarta el resto,
+justo en los dos indicadores que existen para cazar impulsos. Los campos
+`...HoldDb` retienen el máximo **desde la lectura anterior del maestro** y
+`CMD_GET_DATA` los reinicia, de modo que no se pierde ningún evento sea cual
+sea el periodo de sondeo. Tras reiniciarse llevan el valor del último segundo,
+nunca 0.
+
+**`lden_periods` / `lden_minutes`: sobre qué se apoya el Lden.** El nodo
+publica Lden desde el primer segundo válido, así que a las 07:00:02 ya hay un
+"Lden (24 h)" calculado con dos segundos de día. Estos dos campos dicen qué
+franjas tienen datos y cuántos minutos se han acumulado en total, para que el
+maestro pueda tratarlo como provisional en lugar de almacenarlo como índice de
+24 horas. Es lo mismo que `window_fill` hace para L10/L90.
+
 **Cuidado al pedir menos bytes de los que ofrece `CMD_GET_DATA`.** El nodo
-escribe los 76 bytes de `SensorData` en el búfer de transmisión del esclavo.
+escribe los 88 bytes de `SensorData` en el búfer de transmisión del esclavo.
 Un master antiguo que pida solo los 68 de la definición 3.2.x obtiene
 exactamente los campos que espera —por eso los campos nuevos van al final—,
-pero deja 8 bytes sin consumir en el FIFO del esclavo. En las pruebas hechas
+pero deja 20 bytes sin consumir en el FIFO del esclavo. En las pruebas hechas
 hasta ahora el HAL del ESP32 reinicia ese búfer en cada `onRequest`, así que no
 se arrastran a la lectura siguiente; aun así **la recomendación es pedir
 `sizeof(SensorData)` completo** y quedarse con los campos que interesen, que es

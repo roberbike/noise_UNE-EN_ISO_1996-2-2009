@@ -104,6 +104,10 @@ private:
     int win_head_ = 0;
     int win_count_ = 0;
 
+    // Valid (non-sentinel) seconds currently in the window, published in the
+    // metadata every second so the master can spot a partial percentile.
+    int win_valid_ = 0;
+
     // Scratch space for nth_element. A per-instance member, not a
     // function-local static: two aggregators would have shared the static one.
     float scratch_[AGG_WINDOW_SEC];

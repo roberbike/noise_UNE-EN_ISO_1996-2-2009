@@ -73,7 +73,21 @@ Biquad aWeightingFilters[3] = {
 // is fitted by least squares over 20 Hz-7.9 kHz, bringing the band within
 // +-0.05 dB. Poles |z| = 0.65 and 0.045, comfortably stable. Normalized to
 // 0 dB at 1 kHz, so CALIBRATION_RMS_MV stays valid.
-// Regenerate with tools/gen_a_weight.py (fit_c_third_section_16k).
+//
+// TRADE-OFF, same as for the A refit but sharper here. These are digital
+// filters: they act after sampling, so they weight an aliased component at the
+// frequency it APPEARS at, not the one it came from. The old rolloff therefore
+// masked aliasing as a side effect — content folding down from 9-11 kHz lands
+// at 5-7 kHz, where the broken cascade attenuated it by 1.5 to 12 dB. An
+// accurate cascade passes that band at nearly full weight, so with no analog
+// anti-alias filter in front of the MAX4466 the aliased energy now counts in
+// full. It bites harder on C than on A because C is essentially flat from 2 to
+// 8 kHz and because LCpeak is a peak: one aliased impulse moves it, where an
+// energy average would dilute it. The fix is hardware, not coefficients — an
+// RC low-pass at ~8 kHz on the MAX4466 output (see docs/ESTUDIO_TECNICO.md
+// section 7). Masking a measurement error with a second measurement error was
+// not a defensible alternative.
+// Regenerate with tools/gen_a_weight.py (fit_c_high_section_16k).
 #ifdef C_WEIGHT_LEGACY_16K
 Biquad cWeightingFilters[2] = {
     {0.49718768f, 0.99437536f, 0.49718768f, 0.82156382f, 0.16874178f, 0, 0},

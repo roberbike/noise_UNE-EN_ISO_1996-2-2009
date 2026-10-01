@@ -111,6 +111,22 @@ struct SensorData {
     // old 68-byte size gets exactly the layout it expects.
     float noiseLASmaxDb;      // Max with Slow (1 s) time weighting, dB(A)
     float noiseLCpeakDb;      // Absolute C-weighted peak, dB(C) — impulsive
+    // --- appended in 3.3.1 ---
+    // #A7 The two fields above are maxima over the LAST SECOND ONLY, so a
+    // master polling every 5 s sees one second in five and misses roughly 80 %
+    // of impulsive events — precisely what LASmax and LCpeak exist to catch.
+    // These two hold the maximum since the master's previous CMD_GET_DATA, and
+    // are reset by that read, so no event is lost whatever the polling period.
+    // After a reset they carry the latest second's values, never 0.
+    float noiseLASmaxHoldDb;  // Max LASmax since the previous read, dB(A)
+    float noiseLCpeakHoldDb;  // Max LCpeak since the previous read, dB(C)
+    // #A5 CRC-16/CCITT-FALSE over every byte before this field. The layout
+    // guards and `cycles` catch a shifted struct and a frozen node, but
+    // neither catches a frame corrupted in transit that still advances. A
+    // master that checks this can discard the frame instead of publishing it.
+    // Computed by the node on each read, so it also covers the hold fields.
+    uint16_t crc16;
+    uint16_t reserved;        // keeps sizeof deterministic; must stay 0
 };
 
 // Wire-format guards. Masters read SensorData as a raw byte block, so each
@@ -121,6 +137,28 @@ static_assert(offsetof(SensorData, noiseAvgDb) == 8, "wire format: noiseAvgDb mo
 static_assert(offsetof(SensorData, lowNoiseLevel) == 44, "wire format: lowNoiseLevel moved");
 static_assert(offsetof(SensorData, cycles) == 48, "wire format: cycles moved");
 static_assert(offsetof(SensorData, noiseLden) == 64, "wire format: noiseLden moved");
+static_assert(offsetof(SensorData, noiseLASmaxDb) == 68, "wire format: noiseLASmaxDb moved");
+static_assert(offsetof(SensorData, noiseLCpeakDb) == 72, "wire format: noiseLCpeakDb moved");
+static_assert(offsetof(SensorData, crc16) == 84, "wire format: crc16 moved");
+static_assert(sizeof(SensorData) == 88, "wire format: unexpected SensorData size");
+
+// Bytes the CRC covers: everything ahead of the crc16 field itself.
+#define SENSORDATA_CRC_LEN (offsetof(SensorData, crc16))
+
+// CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF). Bitwise: 88 bytes is under
+// 700 iterations, far too cheap to justify a lookup table in flash.
+static inline uint16_t sensordata_crc16(const void *data, size_t len) {
+    const uint8_t *p = (const uint8_t *)data;
+    uint16_t crc = 0xFFFF;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= (uint16_t)p[i] << 8;
+        for (int b = 0; b < 8; b++) {
+            crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021)
+                                 : (uint16_t)(crc << 1);
+        }
+    }
+    return crc;
+}
 
 // --- Function Prototypes ---
 void DSP_Init();

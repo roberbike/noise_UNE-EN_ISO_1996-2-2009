@@ -91,8 +91,15 @@ struct NodeMetadata {
     // unaffected: the field is appended, like SensorData's.
     uint16_t window_fill;
     uint16_t window_size;     // AGG_WINDOW_SEC this firmware was built with
+    // Appended in 3.3.1: how much the Lden periods have actually accumulated.
+    // Lden is published from the first valid second of a period, so at
+    // 07:00:02 a node already reports an "Lden (24h)" built from two seconds
+    // of day. window_fill solved exactly this for L10/L90; these do it for
+    // Lden. Bit 0 = day has data, bit 1 = evening, bit 2 = night.
+    uint8_t lden_periods;
+    uint16_t lden_minutes;    // accumulated minutes across populated periods
 } __attribute__((packed));
-static_assert(sizeof(NodeMetadata) == 13, "metadata wire size changed");
+static_assert(sizeof(NodeMetadata) == 16, "metadata wire size changed");
 
 // --- Secure Queue Payload ---
 // Packed struct to guarantee memory size alignment across FreeRTOS Queues
@@ -124,6 +131,16 @@ void I2C_Comm_SetClipCount(uint16_t clip_count);
 // partial window from a full one. I2C_Comm does not include the aggregator
 // header, so the size is passed in rather than read from AGG_WINDOW_SEC here.
 void I2C_Comm_SetWindowFill(uint16_t valid_seconds, uint16_t window_size);
+
+// #A7 Feeds this second's impulsive maxima into the hold latches that
+// CMD_GET_DATA reports and resets. Called once per valid second by the
+// aggregator; the latches keep the maximum until the master reads them, so a
+// slow-polling master no longer misses the events between its reads.
+void I2C_Comm_AccumulateImpulsive(float lasmax_db, float lcpeak_db);
+
+// How much the Ld/Le/Ln accumulators hold, for the metadata. periods_mask:
+// bit 0 day, bit 1 evening, bit 2 night. minutes: total across them.
+void I2C_Comm_SetLdenProgress(uint8_t periods_mask, uint16_t minutes);
 
 // #5 time-sync gate: true once the master has set the clock via
 // CMD_SET_TIME_LEGACY. The aggregator polls this before computing Ld/Le/Ln.

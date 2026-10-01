@@ -24,8 +24,34 @@ SCL GPIO 6. **Masa común entre ambas placas** siempre. Pull-ups de 4.7 kΩ a
    - Lectura completa (`sizeof(SensorData)` bytes recibidos).
    - status == 1.
    - `cycles` mayor que el de la lectura anterior.
-4. Opcional: `GET_METADATA` (`0x50`) → 7 bytes con versión de firmware, tipo de
-   nodo (0x01 ADC / 0x02 I2S), time_synced y clip_count del último segundo.
+4. Opcional: `GET_METADATA` (`0x50`) → **16 bytes** desde 3.3.1: versión de
+   firmware, tipo de nodo (0x01 ADC / 0x02 I2S), `time_synced`, `clip_count`
+   del último segundo, offset de calibración, llenado de la ventana L10/L90 y
+   cuánto lleva acumulado Lden. La trama ha crecido siempre por el final
+   (7 → 9 → 16), así que pide la longitud más larga que conozcas y **acepta
+   una respuesta más corta** de un nodo antiguo.
+
+**La hora hay que enviarla, y en epoch LOCAL.** En este ejemplo la llamada a
+`setNodeTime()` está **comentada a propósito**, porque solo tú sabes de dónde
+sacas la hora. Pero si la dejas comentada, el nodo nunca tiene reloj: los
+metadatos devuelven `time_synced = 0` y **Ld, Le, Ln y Lden se quedan en 0 de
+por vida**. El nodo no aplica ninguna zona horaria: usa el epoch que recibe tal
+cual, así que hay que enviarle **hora local, no UTC** (en España UTC+1 en
+invierno y UTC+2 en verano) y reenviarla tras cada cambio de horario. Si envías
+UTC, los índices por franja salen desplazados una o dos horas sin ningún aviso.
+
+**Integridad de la trama (3.3.1).** Los 88 bytes terminan en un CRC-16 que
+cubre todo lo anterior. Compruébalo antes de publicar: las guardas de layout
+detectan un struct desplazado y `cycles` detecta un nodo congelado, pero una
+trama corrompida en tránsito puede traer `status = 1` y un `cycles` que avanza,
+y pasaría las dos. El ejemplo lo verifica y descarta la trama si no cuadra.
+
+**Ruido impulsivo: usa los campos `...HoldDb`.** `noiseLASmaxDb` y
+`noiseLCpeakDb` son máximos **del último segundo**, así que un maestro que
+sondee cada 5 s descarta cuatro segundos de cada cinco justo en el indicador
+que existe para cazar impulsos. `noiseLASmaxHoldDb` y `noiseLCpeakHoldDb`
+retienen el máximo **desde tu lectura anterior** y se reinician con ella, de
+modo que no se pierde ningún evento sea cual sea tu periodo de sondeo.
 
 **Por qué la validación triple.** Una lectura completa no basta: el esclavo I2C
 de arduino-esp32 puede rellenar con padding una respuesta corta y hacer que
@@ -86,7 +112,13 @@ Slave side: ESP32-C3 → SDA GPIO 8 / SCL GPIO 10; XIAO ESP32-S3 → SDA GPIO 5 
    - Full read (`sizeof(SensorData)` bytes received)
    - `status == 1`
    - `cycles` greater than the previous read
-4. Optional: `GET_METADATA` (`0x50`) → 7 bytes with firmware version, node type (0x01 ADC / 0x02 I2S), `time_synced`, and last-second `clip_count`.
+4. Optional: `GET_METADATA` (`0x50`) → **16 bytes** as of 3.3.1: firmware version, node type (0x01 ADC / 0x02 I2S), `time_synced`, last-second `clip_count`, calibration offset, L10/L90 window fill, and how much Lden has accumulated. The frame has only ever grown at the end (7 → 9 → 16), so request the longest length you know and **accept a shorter reply** from an older node.
+
+**The clock must be sent, as a LOCAL epoch.** The `setNodeTime()` call is commented out on purpose — only you know your time source. Leave it commented and the node never gets a clock: metadata reports `time_synced = 0` and **Ld, Le, Ln and Lden stay 0 forever**. The node applies no timezone of its own, so send **local time, not UTC**, and resend it after each DST change; sending UTC shifts every period index by one or two hours with no warning.
+
+**Frame integrity (3.3.1).** The 88 bytes end in a CRC-16 covering everything before it. Check it before publishing: the layout guards catch a shifted struct and `cycles` catches a frozen node, but a frame corrupted in transit can arrive with `status = 1` and an advancing `cycles` and would pass both.
+
+**Impulsive noise: use the `...HoldDb` fields.** `noiseLASmaxDb` and `noiseLCpeakDb` are maxima over the last second only, so a master polling every 5 s throws away four seconds in five in the very indicator meant to catch impulses. `noiseLASmaxHoldDb` and `noiseLCpeakHoldDb` hold the maximum since your previous read and are reset by it.
 
 **Why the triple validation.** A full read alone is not enough: the ESP32 I2C slave HAL can pad a short reply to the full length. A stalled slave can also return a valid but frozen structure; only the advance of `cycles` detects that. Without this check, a stuck node can generate flat but believable lines in the dashboard.
 
