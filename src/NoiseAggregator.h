@@ -49,6 +49,13 @@ static_assert(AGG_WINDOW_SEC >= 10 && AGG_WINDOW_SEC <= 3600,
 // Convert a linear RMS amplitude (mV for ADC, full-scale for I2S) to dB SPL.
 typedef float (*AmplitudeToDb)(float amplitude);
 
+// Stored in the sliding window for an invalid second, so the window still
+// advances exactly one slot per wall-clock second instead of stalling on gaps.
+// The sentinel ages out of the window like any other sample but is excluded
+// from the percentile. No real dB SPL level can come near it.
+#define WIN_INVALID_DB (-1000.0f)
+#define WIN_IS_VALID(v) ((v) > -500.0f)
+
 struct SecondInput {
     float mean_sq;       // mean of squared A-weighted samples over the second
     float max_fast_sq;   // max of the 125 ms fast EMA of squared samples
@@ -90,11 +97,16 @@ private:
     SensorData last_{};
 
     // L10/L90 sliding window: circular buffer of the last AGG_WINDOW_SEC
-    // one-second LAeq values. head_ is the next write slot; count_ grows to
-    // AGG_WINDOW_SEC and then stays full (oldest sample overwritten each sec).
+    // one-second LAeq values, one slot per wall-clock second. An invalid
+    // second stores WIN_INVALID_DB. head_ is the next write slot; count_ grows
+    // to AGG_WINDOW_SEC and then stays full (oldest sample overwritten).
     float win_buffer_[AGG_WINDOW_SEC];
     int win_head_ = 0;
     int win_count_ = 0;
+
+    // Scratch space for nth_element. A per-instance member, not a
+    // function-local static: two aggregators would have shared the static one.
+    float scratch_[AGG_WINDOW_SEC];
 
     // Period accumulators
     PeriodStats day_{};

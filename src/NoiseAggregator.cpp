@@ -45,8 +45,18 @@ bool NoiseAggregator::process(const SecondInput &in, SensorData &out, uint8_t &m
 
     bool valid = in.input_valid && (rms_amp > min_amp_);
 
+    // --- Sliding window advances every second, valid or not ---
+    // Previously the buffer was only written inside the validity gate, so a
+    // run of invalid seconds froze the window and "the last 300 s" could span
+    // far more than 300 s of wall clock. One slot per second keeps the window
+    // a real time window; invalid seconds hold a sentinel that ages out
+    // normally and is skipped when the percentiles are selected.
+    float laeq = valid ? to_db_(rms_amp) : WIN_INVALID_DB;
+    win_buffer_[win_head_] = laeq;
+    win_head_ = (win_head_ + 1) % AGG_WINDOW_SEC;
+    if (win_count_ < AGG_WINDOW_SEC) win_count_++;
+
     if (valid) {
-        float laeq = to_db_(rms_amp);
         float lafmax = to_db_(fast_amp);
 
         // LASmax: max level with Slow (1 s) time weighting. Same amplitude->dB
@@ -78,36 +88,40 @@ bool NoiseAggregator::process(const SecondInput &in, SensorData &out, uint8_t &m
         last_.noiseAvgLegalMax = fast_scaled;
         last_.noiseAvgLegalMaxDb = lafmax;
 
-        // --- L10/L90 over a sliding window of the last AGG_WINDOW_SEC s ---
-        // Insert this second's LAeq into the circular buffer, then recompute
-        // the percentiles over the whole window every second. The master thus
-        // always reads the percentiles for the last AGG_WINDOW_SEC seconds up
-        // to its read, with no per-block "staircase". nth_element is O(N), so
-        // this stays cheap even for 300-600 s windows.
-        win_buffer_[win_head_] = laeq;
-        win_head_ = (win_head_ + 1) % AGG_WINDOW_SEC;
-        if (win_count_ < AGG_WINDOW_SEC) win_count_++;
-
+        // --- L10/L90 over the sliding window (inserted above) ---
+        // Recompute the percentiles over the whole window every second, so the
+        // master always reads the percentiles for the last AGG_WINDOW_SEC
+        // seconds up to its read, with no per-block "staircase". nth_element
+        // is O(N), so this stays cheap even for 300-600 s windows.
         {
-            // Copy the valid part of the window and select the percentile ranks.
-            static float tmp[AGG_WINDOW_SEC];
-            memcpy(tmp, win_buffer_, win_count_ * sizeof(float));
+            // Compact the window into the scratch buffer, dropping the
+            // sentinels left by invalid seconds.
+            int n = 0;
+            for (int i = 0; i < win_count_; i++) {
+                if (WIN_IS_VALID(win_buffer_[i])) scratch_[n++] = win_buffer_[i];
+            }
+            // How full the window is, for the master: a percentile over 12 s
+            // is not the same statistic as one over 300 s, and until now there
+            // was no way to tell the two apart from the bus.
+            I2C_Comm_SetWindowFill((uint16_t)n, (uint16_t)AGG_WINDOW_SEC);
 
-            // L10 = level exceeded 10% of the time = 90th percentile by value.
-            // L90 = level exceeded 90% of the time = 10th percentile by value.
-            int idx_l10 = (int)(win_count_ * 0.90f);
-            int idx_l90 = (int)(win_count_ * 0.10f);
-            if (idx_l10 >= win_count_) idx_l10 = win_count_ - 1;
+            if (n > 0) {
+                // L10 = level exceeded 10% of the time = 90th percentile by
+                // value. L90 = exceeded 90% of the time = 10th percentile.
+                int idx_l10 = (int)(n * 0.90f);
+                int idx_l90 = (int)(n * 0.10f);
+                if (idx_l10 >= n) idx_l10 = n - 1;
 
-            std::nth_element(tmp, tmp + idx_l90, tmp + win_count_);
-            float l90 = tmp[idx_l90];
-            std::nth_element(tmp, tmp + idx_l10, tmp + win_count_);
-            float l10 = tmp[idx_l10];
+                std::nth_element(scratch_, scratch_ + idx_l90, scratch_ + n);
+                float l90 = scratch_[idx_l90];
+                std::nth_element(scratch_, scratch_ + idx_l10, scratch_ + n);
+                float l10 = scratch_[idx_l10];
 
-            last_.noiseAvgLegal = l10;
-            last_.noiseAvgLegalDb = l10;
-            // L90 stored as uint16_t; guard the cast against a spurious sub-zero.
-            last_.lowNoiseLevel = (l90 > 0.0f) ? (uint16_t)(l90 + 0.5f) : 0;
+                last_.noiseAvgLegal = l10;
+                last_.noiseAvgLegalDb = l10;
+                // L90 stored as uint16_t; guard against a spurious sub-zero.
+                last_.lowNoiseLevel = (l90 > 0.0f) ? (uint16_t)(l90 + 0.5f) : 0;
+            }
         }
 
         // --- Period indicators (only with a synced clock, #5) ---
@@ -137,12 +151,29 @@ bool NoiseAggregator::process(const SecondInput &in, SensorData &out, uint8_t &m
                 if (evening_.hasData()) last_.Le = evening_.getAvg();
                 if (night_.hasData())   last_.Ln = night_.getAvg();
 
-                if (last_.Ld > 0 || last_.Le > 0 || last_.Ln > 0) {
-                    float e = (12.0f * powf(10.0f, last_.Ld / 10.0f) +
-                                4.0f * powf(10.0f, (last_.Le + 5.0f) / 10.0f) +
-                                8.0f * powf(10.0f, (last_.Ln + 10.0f) / 10.0f)) / 24.0f;
-                    last_.noiseLden = 10.0f * log10f(e);
+                // Lden over the periods that ACTUALLY have data, weighted by
+                // their hours. The naive 24 h formula counted a period with no
+                // samples yet as 0 dB — energy 1 — which dragged the result
+                // down hard: with only Ld = 55 it returned 52.0 dB instead of
+                // 55.0, so every node published a depressed Lden until the
+                // night period had filled. Once all three periods are
+                // populated the divisor is 24 again and the value is
+                // identical to the standard definition.
+                float num = 0.0f, hours = 0.0f;
+                if (day_.hasData()) {
+                    num += 12.0f * powf(10.0f, last_.Ld / 10.0f);
+                    hours += 12.0f;
                 }
+                if (evening_.hasData()) {
+                    num += 4.0f * powf(10.0f, (last_.Le + 5.0f) / 10.0f);
+                    hours += 4.0f;
+                }
+                if (night_.hasData()) {
+                    num += 8.0f * powf(10.0f, (last_.Ln + 10.0f) / 10.0f);
+                    hours += 8.0f;
+                }
+                last_.noiseLden = (hours > 0.0f) ? 10.0f * log10f(num / hours)
+                                                 : 0.0f;
 
             }
         }

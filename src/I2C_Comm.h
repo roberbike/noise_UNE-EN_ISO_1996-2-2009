@@ -83,7 +83,16 @@ struct NodeMetadata {
     uint8_t time_synced;      // 1 once the master has set the clock
     uint16_t clip_count;      // full-scale samples in the last second (I2S)
     int16_t calib_offset;     // NVS calibration offset, hundredths of dB
+    // Appended in 3.3.1: how many valid seconds the L10/L90 window currently
+    // holds, out of AGG_WINDOW_SEC. Until now a master could not tell a
+    // percentile computed over 12 s from one over a full 300 s window, and
+    // after a boot or a run of invalid seconds it published the former as if
+    // it were the latter. A master reading only the original 9 bytes is
+    // unaffected: the field is appended, like SensorData's.
+    uint16_t window_fill;
+    uint16_t window_size;     // AGG_WINDOW_SEC this firmware was built with
 } __attribute__((packed));
+static_assert(sizeof(NodeMetadata) == 13, "metadata wire size changed");
 
 // --- Secure Queue Payload ---
 // Packed struct to guarantee memory size alignment across FreeRTOS Queues
@@ -108,6 +117,13 @@ void I2C_Comm_Init();
 // #12 metadata setters (called by the node firmware)
 void I2C_Comm_SetNodeType(uint8_t node_type);
 void I2C_Comm_SetClipCount(uint16_t clip_count);
+
+// How many valid seconds the L10/L90 sliding window currently holds, and the
+// window length this firmware was built with. The aggregator reports both
+// every second; they are published in the metadata so the master can tell a
+// partial window from a full one. I2C_Comm does not include the aggregator
+// header, so the size is passed in rather than read from AGG_WINDOW_SEC here.
+void I2C_Comm_SetWindowFill(uint16_t valid_seconds, uint16_t window_size);
 
 // #5 time-sync gate: true once the master has set the clock via
 // CMD_SET_TIME_LEGACY. The aggregator polls this before computing Ld/Le/Ln.

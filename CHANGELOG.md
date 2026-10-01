@@ -11,6 +11,61 @@ Fixes from an independent review (DeepSeek). Items already resolved in 3.3.0
 digital node) are not repeated here. Timezone handling was deliberately left
 out: the master sends LOCAL epoch and the node applies no timezone of its own.
 
+### Added
+
+- **`window_fill` / `window_size` en los metadatos** (`CMD_GET_METADATA`, que
+  pasa de 9 a 13 bytes, añadiendo por el final). Un master no tenía forma de
+  distinguir un L10/L90 calculado sobre 12 segundos de uno sobre los 300 de la
+  ventana completa, y tras un arranque publicaba el primero como si fuera el
+  segundo. Ahora puede marcarlo como provisional.
+
+### Fixed
+
+- **Cuatro arreglos que el CHANGELOG de 3.3.0 prometía y el código no tenía.**
+  Documentaban la rama `devel`, que no se fundió en `main`, así que la release
+  salió con el texto por delante del código. Implementados ahora:
+  - **Lden se hundía mientras algún periodo estuviera vacío**: un periodo sin
+    datos entraba en la suma energética como 0 dB (energía 1). Con solo
+    `Ld = 55` el resultado era **52,0 dB en lugar de 55,0**. Ahora se promedia
+    únicamente sobre los periodos que tienen datos, ponderados por sus horas;
+    con los tres poblados el divisor vuelve a ser 24 y el valor es idéntico al
+    de la definición estándar (verificado: 56,55 dB en ambos casos).
+  - **La ventana L10/L90 se estiraba sobre los segundos inválidos**: solo
+    avanzaba en segundos válidos, así que "300 s" podía abarcar mucho más
+    tiempo de reloj. Ahora avanza una ranura por segundo; los inválidos guardan
+    un centinela que envejece con normalidad y queda fuera del percentil.
+  - **`DSP_Init()` estaba vacío**: ahora limpia el estado (z1/z2) de las dos
+    cascadas, de modo que un reinicio lógico queda bien definido.
+  - **El buffer de percentiles era un `static` local de función**: pasa a
+    miembro de instancia, para que dos agregadores no lo compartan.
+- **Filtro C a 16 kHz con el mismo defecto que tenía el A.** El prototipo C
+  comparte el polo doble de 12194 Hz, que a 16 kHz queda por encima de Nyquist,
+  así que la transformada bilineal lo colapsaba igual: −0,51 dB a 4 kHz,
+  −1,51 a 5 kHz y **−5,73 a 6,3 kHz** frente a la curva IEC 61672-1. Importa
+  porque LCpeak es el indicador de ruido impulsivo y los impulsos llevan
+  energía real en 5-8 kHz, de modo que el nodo analógico los subestimaba. La
+  sección de 20,6 Hz es exacta y se conserva; la de alta frecuencia se ajusta
+  por mínimos cuadrados y deja la banda en **±0,05 dB** (polos 0,65 y 0,045,
+  estables; 0 dB exacto a 1 kHz, así que `CALIBRATION_RMS_MV` sigue válido).
+  `C_WEIGHT_LEGACY_16K` restaura los coeficientes anteriores, y
+  `tools/gen_a_weight.py` reproduce los nuevos.
+- **El maestro de ejemplo no tenía guardas de layout** — la causa raíz del
+  fallo de 3.3.0 seguía viva en su lado: ambos extremos compilaban, la lectura
+  devolvía el número de bytes esperado y los valores eran silenciosamente
+  erróneos. Añadidos los mismos `static_assert` de offsets y de `sizeof`.
+- **El maestro de ejemplo fijaba la longitud de los metadatos en 9 bytes**:
+  ahora pide la longitud más larga que conoce y acepta una respuesta más corta
+  de un nodo antiguo, y drena el bus en lugar de dejar bytes sin consumir.
+- `docs/RAMA_48KHZ.md` contradecía al código: decía 1536 frames de DMA y
+  +24 KB cuando `MIC_I2S.h` usa 768 (16 ms, +6 KB) porque el driver I2S
+  heredado limita `dma_buf_len` a 1024; seguía llamándose "rama experimental"
+  cuando 48 kHz es el build por defecto del entorno S3; y su paso 5 presentaba
+  como verificación de exactitud un tono de 8-16 kHz que a 16 kHz entra como
+  alias por definición.
+- Comentario desfasado del contador de recortes ("a 16 kHz un segundo nunca
+  llega a 65535") en un nodo que ya muestrea a 48 kHz, ahora con saturación
+  explícita; y bloque de comentario duplicado en `ruido_setup()`.
+
 ### Fixed
 
 - **Wire format: `SensorData` binary compatibility was broken in 3.3.0.**
@@ -93,6 +148,12 @@ out: the master sends LOCAL epoch and the node applies no timezone of its own.
 ---
 
 ## [3.3.0-devel] - 2026-08-26 (code review fixes)
+
+> **Nota (3.3.1):** esta sección describe la rama `devel`, que nunca se fundió
+> en `main`. La 3.3.0 publicada **no** incluía cuatro de estos arreglos (Lden
+> sobre periodos con datos, centinela de la ventana L10/L90, `DSP_Init()` y el
+> buffer de percentiles) ni `CMD_GET_DATA_COMPACT`. Los cuatro primeros se
+> implementan por fin en 3.3.1; el comando compacto sigue solo en `devel`.
 
 ### Fixed
 

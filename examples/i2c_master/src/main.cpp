@@ -15,6 +15,7 @@
 
 #include <Arduino.h>
 #include <Wire.h>
+#include <stddef.h>   // offsetof, for the layout guards below
 
 /**
  * Master device: XIAO ESP32-S3 / Lolin S2 Mini
@@ -69,6 +70,16 @@ struct SensorData {
   float noiseLCpeakDb;
 };
 
+// Offset guards. THIS is what was missing when 3.3.0 moved two fields: both
+// sides still compiled, the read still returned the expected byte count, and
+// the values were silently wrong. If these ever fail, your struct has drifted
+// from the node's — fix the struct, do not change the numbers.
+static_assert(offsetof(SensorData, noiseAvgDb)   ==  8, "layout: noiseAvgDb moved");
+static_assert(offsetof(SensorData, lowNoiseLevel) == 44, "layout: lowNoiseLevel moved");
+static_assert(offsetof(SensorData, cycles)        == 48, "layout: cycles moved");
+static_assert(offsetof(SensorData, noiseLden)     == 64, "layout: noiseLden moved");
+static_assert(sizeof(SensorData) == 76, "layout: unexpected SensorData size");
+
 // Reference helper: push a persistent calibration offset (dB) to the node.
 // The node stores it in NVS (survives reboots) and applies it to every level.
 // Typical use: with a physical calibrator emitting 94.0 dB, if the node reads
@@ -115,6 +126,10 @@ void setup() {
   // timezone offset, or an RTC already holding local time). The node needs
   // this before it can produce Ld/Le/Ln/Lden; metadata byte 4 reports whether
   // it took effect (time_synced).
+  // REQUIRED for Ld/Le/Ln/Lden: the node has no clock of its own and
+  // computes nothing until a master sets one. Left commented because only you
+  // know your time source — but if you leave it commented, expect Lden = 0
+  // and time_synced = 0 in the metadata forever. LOCAL epoch, not UTC.
   // setNodeTime(local_epoch_from_your_time_source());
 }
 
@@ -199,22 +214,34 @@ void loop() {
         // publishToCloud(data);   // integrate here
       }
 
-      // #12: optional metadata read (fw version, node type, time-sync, clips,
-      // NVS calibration offset). Metadata is 9 bytes as of the calibration
-      // feature; older nodes returned 7.
+      // #12: optional metadata read. The frame grew by appending, so read the
+      // longest known length and accept a shorter reply from an older node:
+      // 7 bytes originally, 9 with the calibration offset, 13 since 3.3.1
+      // with the L10/L90 window fill. Never hard-code one length.
       Wire.beginTransmission(SLAVE_ADDR);
       Wire.write(CMD_GET_METADATA);
       if (Wire.endTransmission() == 0) {
         delay(5);
-        if (Wire.requestFrom((uint16_t)SLAVE_ADDR, (size_t)9) == 9) {
-          uint8_t m[9];
-          for (int i = 0; i < 9; i++) m[i] = Wire.read();
+        uint8_t m[13] = {0};
+        int got = Wire.requestFrom((uint16_t)SLAVE_ADDR, (size_t)sizeof(m));
+        if (got >= 7) {
+          for (int i = 0; i < got && i < (int)sizeof(m); i++) m[i] = Wire.read();
+          while (Wire.available()) Wire.read();   // never leave bytes behind
           uint16_t clips = (uint16_t)m[5] | ((uint16_t)m[6] << 8);
-          int16_t calib = (int16_t)((uint16_t)m[7] | ((uint16_t)m[8] << 8));
+          int16_t calib = (got >= 9)
+              ? (int16_t)((uint16_t)m[7] | ((uint16_t)m[8] << 8)) : 0;
           Serial.printf("Meta: fw %u.%u.%u | node=%s | time_synced=%u | clips=%u | calib=%.2f dB\n",
                         m[0], m[1], m[2],
                         (m[3] == 0x02 ? "I2S" : (m[3] == 0x01 ? "ADC" : "?")),
                         m[4], clips, calib / 100.0f);
+          if (got >= 13) {
+            uint16_t fill = (uint16_t)m[9]  | ((uint16_t)m[10] << 8);
+            uint16_t wsize = (uint16_t)m[11] | ((uint16_t)m[12] << 8);
+            // A percentile over a partial window is a different statistic.
+            // Treat L10/L90 as provisional until the window has filled.
+            Serial.printf("      L10/L90 window: %u/%u s%s\n", fill, wsize,
+                          (wsize && fill < wsize) ? "  (PARTIAL)" : "");
+          }
         }
       }
     } else {

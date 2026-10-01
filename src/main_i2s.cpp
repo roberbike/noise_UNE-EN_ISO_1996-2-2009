@@ -203,9 +203,13 @@ void aggregator_task(void *pvParameters) {
             };
 
             bool valid = aggregator.process(in, out, mic_ok);
-            // uint32_t -> uint16_t: at 16 kHz a second never reaches 65535
-            // clips, but the explicit cast silences -Wconversion.
-            I2C_Comm_SetClipCount((uint16_t)secData.clip_count); // #12 metadata
+            // uint32_t -> uint16_t. The S3 node now samples at 48 kHz, so a
+            // fully clipped second is 48000 counts: still inside uint16_t,
+            // but no longer the comfortable margin the old 16 kHz comment
+            // claimed. Saturate rather than wrap if the rate ever rises.
+            I2C_Comm_SetClipCount(secData.clip_count > 65535u
+                                  ? (uint16_t)65535u
+                                  : (uint16_t)secData.clip_count); // #12
 
             if (valid) {
                 Serial.printf("[ICS43434] LAeq:%.1f | LAFmx:%.1f | LASmx:%.1f | LCpk:%.1f | L10:%.1f | L90:%d | Lden:%.1f | clip:%u | cyc:%u\n",
@@ -258,8 +262,6 @@ void ruido_setup() {
     Serial.printf("[INIT] I2S mic OK BCLK=%d WS=%d SD=%d @ %d Hz\n",
                   MIC_I2S_BCLK, MIC_I2S_WS, MIC_I2S_DIN, SAMPLE_RATE);
 
-    // Shared aggregator: I2S samples are already full-scale (scale = 1.0);
-    // dBFS->SPL via sensitivity; 1e-5 FS floor flags a dead SD line.
     // Shared aggregator: I2S samples are already full-scale (amp scale = 1.0);
     // dBFS->SPL via sensitivity; 1e-5 FS floor flags a dead SD line; the
     // integer `noise` field is stored in µFS (int_scale = 1e6) so it doesn't

@@ -36,6 +36,8 @@ static volatile uint8_t time_dirty = 0;
 static volatile uint8_t meta_node_type = 0x00;
 static volatile uint8_t meta_time_synced = 0;
 static volatile uint16_t meta_clip_count = 0;
+static volatile uint16_t meta_window_fill = 0;
+static volatile uint16_t meta_window_size = 0;
 
 float I2C_Comm_GetCalibOffset() {
     return calib_offset_db;
@@ -80,6 +82,11 @@ void I2C_Comm_SetNodeType(uint8_t node_type) {
 
 void I2C_Comm_SetClipCount(uint16_t clip_count) {
     meta_clip_count = clip_count;
+}
+
+void I2C_Comm_SetWindowFill(uint16_t valid_seconds, uint16_t window_size) {
+    meta_window_fill = valid_seconds;
+    meta_window_size = window_size;
 }
 
 bool I2C_Comm_TimeSynced() {
@@ -191,7 +198,8 @@ void requestEvent() {
             NodeMetadata meta = {
                 FW_VERSION_MAJOR, FW_VERSION_MINOR, FW_VERSION_PATCH,
                 meta_node_type, meta_time_synced, meta_clip_count,
-                (int16_t)lroundf(calib_offset_db * 100.0f)
+                (int16_t)lroundf(calib_offset_db * 100.0f),
+                meta_window_fill, meta_window_size
             };
             Wire.write((uint8_t *)&meta, sizeof(NodeMetadata));
             break;

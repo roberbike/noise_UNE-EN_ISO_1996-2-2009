@@ -87,7 +87,7 @@ Definidos en [src/I2C_Comm.h](../src/I2C_Comm.h):
 | :--- | :--- | :--- |
 | `CMD_GET_STATUS` | 0x20 | 1 byte: 1 = OK, 0 = no publicar (ver §6) |
 | `CMD_GET_DATA` | 0x01 | `SensorData` completo empaquetado |
-| `CMD_GET_METADATA` | 0x50 | `NodeMetadata` (9 bytes): versión fw, tipo de nodo, time_synced, clip_count, calib_offset |
+| `CMD_GET_METADATA` | 0x50 | `NodeMetadata` (13 bytes): versión fw, tipo de nodo, time_synced, clip_count, calib_offset, llenado de la ventana L10/L90 |
 | `CMD_SET_CALIB` | 0x0A | Escribe offset de calibración (int16 LE, centésimas de dB); se guarda en NVS |
 | `CMD_IDENTIFY` | — | Identificación del nodo |
 | `CMD_LEGACY_*` | — | Lecturas puntuales simples (compatibilidad) |
@@ -130,7 +130,11 @@ no describen lo que llevan:
 | `noiseMin` / `noiseMinDb` | mínimo | **duplicado de la media** — obsoleto, no usar |
 | `noiseLCpeakDb` | — | el **pico real** (ponderación C, sin constante de tiempo) |
 
-**Metadatos del nodo (`CMD_GET_METADATA`).** Devuelve 9 bytes empaquetados:
+**Metadatos del nodo (`CMD_GET_METADATA`).** Devuelve 13 bytes empaquetados.
+La trama ha crecido **siempre por el final**, igual que `SensorData`: 7 bytes
+en origen, 9 al añadirse la calibración y 13 desde la 3.3.1. Un master debe
+pedir la longitud más larga que conozca y **aceptar una respuesta más corta**
+de un nodo antiguo, nunca fijar una longitud única:
 
 | Offset | Campo | Tipo | Significado |
 | :--- | :--- | :--- | :--- |
@@ -141,6 +145,29 @@ no describen lo que llevan:
 | 4 | time_synced | uint8 | 1 cuando el master ya ha fijado la hora |
 | 5-6 | clip_count | uint16 LE | Muestras a fondo de escala en el último segundo (nodo I2S) |
 | 7-8 | calib_offset | int16 LE | Offset de calibración persistente (NVS), centésimas de dB |
+| 9-10 | window_fill | uint16 LE | Segundos válidos que contiene ahora la ventana L10/L90 |
+| 11-12 | window_size | uint16 LE | Longitud de la ventana con la que se compiló (`AGG_WINDOW_SEC`) |
+
+**`window_fill` / `window_size`: cuándo fiarse de L10 y L90.** Un percentil
+sobre 12 segundos no es el mismo estadístico que uno sobre 300, y hasta ahora
+el nodo publicaba el primero con la misma apariencia que el segundo. Tras un
+arranque, o tras una racha de segundos inválidos, `window_fill < window_size`:
+el L10/L90 es provisional y conviene marcarlo como tal en Grafana en lugar de
+tratarlo como un percentil de 5 minutos. La ventana avanza **una ranura por
+segundo de reloj**, válido o no: los segundos inválidos guardan un centinela
+que envejece con normalidad pero queda fuera del percentil, de modo que
+"los últimos 300 s" son 300 s reales y no 300 muestras repartidas en una hora.
+
+**Cuidado al pedir menos bytes de los que ofrece `CMD_GET_DATA`.** El nodo
+escribe los 76 bytes de `SensorData` en el búfer de transmisión del esclavo.
+Un master antiguo que pida solo los 68 de la definición 3.2.x obtiene
+exactamente los campos que espera —por eso los campos nuevos van al final—,
+pero deja 8 bytes sin consumir en el FIFO del esclavo. En las pruebas hechas
+hasta ahora el HAL del ESP32 reinicia ese búfer en cada `onRequest`, así que no
+se arrastran a la lectura siguiente; aun así **la recomendación es pedir
+`sizeof(SensorData)` completo** y quedarse con los campos que interesen, que es
+lo que hace el maestro de ejemplo. Si integras un master que pide una longitud
+fija menor, verifícalo en banco antes de desplegarlo.
 
 El master puede usarlo para etiquetar la serie en InfluxDB por tipo de nodo,
 verificar que la hora está sincronizada antes de fiarse de Ld/Le/Ln, y detectar

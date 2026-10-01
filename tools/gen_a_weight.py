@@ -161,4 +161,71 @@ def fit_third_section_16k():
     print("    {%.8ff, %.8ff, %.8ff, %.8ff, %.8ff, 0, 0}"
           % (b0*sc, b1*sc, b2*sc, a1, a2))
 
-fit_third_section_16k()
+
+def fit_c_high_section_16k():
+    """Refit the high-frequency section of the C cascade at 16 kHz.
+
+    C shares the 12194 Hz double pole with A, so at 16 kHz the bilinear
+    transform collapses it exactly the same way and the shipped coefficients
+    were -5.73 dB off at 6.3 kHz. The 20.6 Hz section is exact and kept; only
+    the high section is fitted, over 20 Hz-7.9 kHz, pinned to 0 dB at 1 kHz.
+    Reproduces the coefficients committed in DSP_Engine.cpp.
+    """
+    import numpy as np
+    from scipy.optimize import least_squares
+
+    fs = 16000.0
+    f1, f4 = 20.598997, 12194.217
+    EXACT = (1.0, -2.0, 1.0, -1.98388676, 0.98395167)   # 20.6 Hz double pole
+
+    def c_iec(f):
+        f = np.asarray(f, float)
+        H = (f4**2)*f**2 / ((f**2+f1**2)*(f**2+f4**2))
+        n1 = (f4**2)*1e6 / ((1e6+f1**2)*(1e6+f4**2))
+        return 20*np.log10(H/n1)
+
+    def sec(p, f):
+        b0, b1, b2, a1, a2 = p
+        z = np.exp(2j*np.pi*f/fs)
+        return (b0 + b1/z + b2/z**2)/(1 + a1/z + a2/z**2)
+
+    def casc_db(p, f):
+        return 20*np.log10(np.abs(sec(p, f) * sec(EXACT, f)))
+
+    fit_f = np.logspace(np.log10(20), np.log10(7900), 400)
+    target = c_iec(fit_f)
+
+    def resid(p):
+        d = casc_db(p, fit_f) - target
+        pin = casc_db(p, np.array([1000.0]))[0] * 30.0      # hard 0 dB at 1 kHz
+        r = np.roots([1.0, p[3], p[4]])
+        m = float(np.max(np.abs(r)))
+        pen = (m - 0.985) * 1e4 if m > 0.985 else 0.0       # keep poles inside
+        return np.concatenate([d, [pin], [pen]])
+
+    best = None
+    rng = np.random.default_rng(7)
+    for _ in range(60):
+        p0 = np.array([0.5, 0.5, 0.1, 0.8, 0.15]) + rng.normal(0, 0.6, 5)
+        try:
+            r = least_squares(resid, p0, method='lm', max_nfev=8000)
+        except Exception:
+            continue
+        e = float(np.max(np.abs(casc_db(r.x, fit_f) - target)))
+        if best is None or e < best[0]:
+            best = (e, r.x)
+
+    e, p = best
+    poles = np.abs(np.roots([1.0, p[3], p[4]]))
+    print("C-weighting, high section refit @ 16 kHz")
+    print("  max |error| 20 Hz-7.9 kHz = %.3f dB" % e)
+    print("  pole radii = %s (%s)" % (np.round(poles, 4),
+          "stable" if poles.max() < 1 else "UNSTABLE"))
+    print("  high section for DSP_Engine.cpp:")
+    print("    {%.8ff, %.8ff, %.8ff, %.8ff, %.8ff, 0, 0}" % tuple(p))
+
+
+if __name__ == "__main__":
+    fit_third_section_16k()
+    print()
+    fit_c_high_section_16k()

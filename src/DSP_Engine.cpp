@@ -63,15 +63,43 @@ Biquad aWeightingFilters[3] = {
     {-0.36654287f, 1.61495515f, 0.72597221f, 0.05375630f, -0.07418460f, 0, 0}
 };
 #endif
-// C-weighting @ 16 kHz. Verified vs IEC 61672-1: |err| < 0.6 dB up to 4 kHz.
+// C-weighting @ 16 kHz. The C prototype shares the 12194 Hz double pole with
+// A, so at this rate it had exactly the same problem the A cascade had: the
+// bilinear transform collapses a pole above Nyquist and the response falls off
+// far too early — -0.51 dB at 4 kHz, -1.51 at 5 kHz, -5.73 at 6.3 kHz against
+// the IEC 61672-1 curve. That matters because LCpeak is the impulsive-noise
+// indicator and impulses carry real energy in 5-8 kHz, so the ADC node was
+// underreporting them. The 20.6 Hz section is exact and kept; the high section
+// is fitted by least squares over 20 Hz-7.9 kHz, bringing the band within
+// +-0.05 dB. Poles |z| = 0.65 and 0.045, comfortably stable. Normalized to
+// 0 dB at 1 kHz, so CALIBRATION_RMS_MV stays valid.
+// Regenerate with tools/gen_a_weight.py (fit_c_third_section_16k).
+#ifdef C_WEIGHT_LEGACY_16K
 Biquad cWeightingFilters[2] = {
     {0.49718768f, 0.99437536f, 0.49718768f, 0.82156382f, 0.16874178f, 0, 0},
     {1.00000000f, -2.00000000f, 1.00000000f, -1.98388676f, 0.98395167f, 0, 0}
 };
+#else
+Biquad cWeightingFilters[2] = {
+    {0.87907752f, 0.74318563f, 0.10026646f, 0.69519966f, 0.02929717f, 0, 0},
+    {1.00000000f, -2.00000000f, 1.00000000f, -1.98388676f, 0.98395167f, 0, 0}
+};
+#endif
 #endif
 
 void DSP_Init() {
-    // Basic init if needed
+    // Clear the state of both cascades, so a logical restart is well-defined
+    // and does not carry a stale envelope into the first second. The arrays
+    // are globals and start zeroed at boot, but this makes DSP_Init() mean
+    // something and lets a node reset its DSP without rebooting.
+    for (size_t i = 0; i < sizeof(aWeightingFilters)/sizeof(aWeightingFilters[0]); i++) {
+        aWeightingFilters[i].z1 = 0.0f;
+        aWeightingFilters[i].z2 = 0.0f;
+    }
+    for (size_t i = 0; i < sizeof(cWeightingFilters)/sizeof(cWeightingFilters[0]); i++) {
+        cWeightingFilters[i].z1 = 0.0f;
+        cWeightingFilters[i].z2 = 0.0f;
+    }
 }
 
 float DSP_ApplyFilter(float in, Biquad &f) {
