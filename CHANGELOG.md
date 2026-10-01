@@ -4,6 +4,142 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [3.3.1] - 2026-10-01 (external review fixes)
+
+Fixes from an independent review (DeepSeek). Items already resolved in 3.3.0
+(µFS scaling, sliding L10/L90, NVS calibration, LASmax/LCpeak, 48 kHz on the
+digital node) are not repeated here. Timezone handling was deliberately left
+out: the master sends LOCAL epoch and the node applies no timezone of its own.
+
+### Fixed
+
+- **Wire format: `SensorData` binary compatibility was broken in 3.3.0.**
+  `noiseLASmaxDb` and `noiseLCpeakDb` were inserted in the middle of the
+  struct, before `lowNoiseLevel`, which shifted every field after
+  `noiseAvgLegalMaxDb` by 8 bytes. A master built against the 3.2.x definition
+  (CanAirIO) kept reading the same byte offsets and silently got the wrong
+  values: `lowNoiseLevel` read LASmax, `cycles` read LCpeak, and **`Lden` read
+  `Le`** — a slow-moving energy average, which is why the published Lden looked
+  frozen at a constant value. The two fields are now **appended at the end**,
+  so every pre-existing offset is preserved and a master requesting the old
+  68-byte size gets exactly the layout it expects. The example master in
+  `examples/i2c_master/` carried the same inserted layout and was corrected
+  too. `static_assert` guards on the offsets of `noiseAvgDb`, `lowNoiseLevel`,
+  `cycles` and `noiseLden` now break the build if a future change inserts a
+  field instead of appending it.
+- **B1 · Sample period was truncated by integer division.** `1000000/16000`
+  is 62.5 µs but integer division yielded 62, so the ADC node really ran at
+  16129 Hz (+0.81 %) and its "second" lasted 0.992 s. The sampling loop now
+  carries the remainder and borrows an extra microsecond when it overflows,
+  giving exactly 16000.000 Hz on average (the same fix makes a hypothetical
+  48 kHz polling path exact too — it was off by 4.17 %).
+- **B4 · No overload detection on the ADC node.** The comment claimed clipping
+  was "handled by bias range", which is false: the bias check looks at the DC
+  average and a signal pinned at either rail keeps the mean centred. Samples at
+  the rails are now counted; more than 10 in a second invalidates the reading
+  and the count is published in the metadata, matching the I2S node and the
+  overload indication IEC 61672 expects.
+- **B9 · `PeriodStats::add` discarded seconds below 10 dB**, removing genuinely
+  quiet periods from the energy average and biasing Ld/Le/Ln upwards — exactly
+  the periods a night index must capture. Validity is already decided upstream,
+  so every valid second now counts.
+- **B8 · Day rollover happened after accumulating.** The first second of a new
+  day landed in the previous day's accumulators and was then discarded, and the
+  published Ld/Le/Ln carried yesterday's values into today. The rollover now
+  runs before accumulation and clears the published indices; a period with no
+  data yet reports 0 and stays out of Lden.
+- **R1 · `settimeofday()` ran inside the I2C slave callback**, where newlib
+  locks are unsafe. The callback now only stores the epoch and raises a flag;
+  the clock is set in task context by the new `I2C_Comm_Service()`, which the
+  aggregator task calls once per second. The same callback also wrote the
+  calibration offset straight to NVS, and a flash erase/write blocks for tens
+  of milliseconds with the master waiting on the bus; that write is now
+  deferred through the same path, and the offset is range-checked before being
+  persisted so a corrupted byte cannot store an absurd value that survives
+  reboots.
+- **R2 · `vTaskDelete(NULL)` on a task that may be subscribed to the TWDT.**
+  Both nodes now call `esp_task_wdt_delete(NULL)` and park with
+  `vTaskDelay(portMAX_DELAY)` instead of deleting the task.
+- **B10 · The example master never set the clock**, so `time_synced` stayed 0
+  forever and Ld/Le/Ln/Lden never left 0. It now ships `setNodeTime()` with the
+  local-epoch requirement spelled out.
+- **A-weighting at 16 kHz rebuilt (ADC node).** The 12194 Hz pole of the analog
+  prototype sits above Nyquist at 16 kHz, so the bilinear transform collapsed
+  it and the response fell away far too early: −1.50 dB at 5 kHz, −5.72 at
+  6.3 kHz, −12.18 at 7 kHz, −50 at 7.9 kHz against IEC 61672-1. The first two
+  sections are exact and kept; the third is least-squares fitted over
+  20 Hz–7.9 kHz, bringing the whole band within **±0.15 dB**, still 0 dB at
+  1 kHz (so `CALIBRATION_RMS_MV` remains valid) and with all poles stable.
+  Trade-off: the old section had a zero at Nyquist that masked aliasing from
+  8–9 kHz (the ADC has no analog anti-alias filter); the fitted one does not.
+  For urban spectra only ~1.3 % of A-weighted energy lies above 8 kHz, so the
+  net effect is a clear gain. Build with `-D A_WEIGHT_LEGACY_16K` to restore
+  the previous coefficients, and fit an RC low-pass (~8 kHz) at the MAX4466
+  output to remove the aliasing at source. The 48 kHz node is unaffected
+  (already within 0.52 dB to 7.9 kHz).
+- **C1 · `platformio.ini` claimed compatibility with Arduino core 2.x**, which
+  is false: `ADC_ATTEN_DB_12` only exists from IDF 5.0. Documented as a
+  requirement.
+
+### Changed
+
+- **B3/B6 · Field semantics documented, layout untouched.** `noiseAvgLegal`
+  carries L10 in **dB** despite its "(mV)" legacy name; `noisePeak`/`noisePeakDb`
+  are the Fast-weighted maximum (LAFmax), not an instantaneous peak — the real
+  peak is `noiseLCpeakDb`; `noiseMin`/`noiseMinDb` are duplicates of the average
+  and are deprecated. These are corrected in the comments rather than by moving
+  fields: the wire layout is frozen and masters read it as a byte block.
+
+---
+
+## [3.3.0-devel] - 2026-08-26 (code review fixes)
+
+### Fixed
+
+- **Lden biased low while periods were still empty** (high): a period with no
+  data yet entered the energy sum as 0 dB (energy 1) and dragged the result
+  down — with only `Ld = 55` the result was 52.0 dB instead of 55.0. Lden is
+  now averaged over the periods that actually have data, weighted by their
+  hours. With all three periods populated the value is unchanged.
+- **NVS write from the I2C callback** (high): `CMD_SET_CALIB` wrote flash
+  inside the slave callback, blocking for tens of ms and risking missed
+  responses to the master. The value is now applied immediately and the flash
+  write is deferred to the aggregator task (`I2C_Comm_ServiceNVS()`).
+- **Unvalidated calibration offset** (medium): any int16 was accepted (±327 dB)
+  and persisted in NVS, so one corrupted byte could silently ruin every reading
+  until reflashing. Offsets are now range-checked to ±30 dB.
+- **L10/L90 window stretched over invalid seconds** (medium): the window only
+  advanced on valid seconds, so gaps made "300 s" cover more than 300 s of wall
+  clock. The window now advances every second; invalid seconds hold a sentinel
+  that ages out normally but is excluded from the percentile.
+- **`DSP_Init()` was empty** (medium): it now clears the filter state (z1/z2)
+  of both the A and C biquad cascades, making a logical restart well-defined.
+- **Percentile scratch buffer was a function-local `static`** (low): moved to a
+  per-instance member, so two aggregators could never share it.
+
+### Added
+
+- **`CMD_GET_DATA_COMPACT` (0x02)**: optional 18-byte frame with levels as
+  int16 tenths of dB, little-endian, plus a XOR checksum — for masters that
+  aren't ESP32 or would rather not depend on float layout and struct padding.
+  **Strictly additive**: `CMD_GET_DATA` (0x01) is unchanged, so CanAirIO and
+  every existing master keep working with no modifications. The example master
+  includes a `readCompact()` reference reader.
+
+### Documentation
+
+- README: LASmax and LCpeak added to the indicator table, sliding-window and
+  Lden semantics corrected, compact command documented, normative section
+  updated (Fast + Slow + C-weighted peak now implemented).
+- `docs/COMUNICACION.md`: compact payload layout, calibration range and
+  deferred NVS write, window behaviour across invalid seconds.
+- `docs/ESTUDIO_TECNICO.md`: Slow weighting and LCpeak reflected as implemented.
+- Example master README: metadata is 9 bytes, compact alternative explained.
+
+---
+
+## [3.3.0-devel] - 2026-08-25
+
 ## [3.3.0] - 2026-09-12
 
 ### Added
