@@ -53,6 +53,13 @@ que existe para cazar impulsos. `noiseLASmaxHoldDb` y `noiseLCpeakHoldDb`
 retienen el máximo **desde tu lectura anterior** y se reinician con ella, de
 modo que no se pierde ningún evento sea cual sea tu periodo de sondeo.
 
+**Un solo maestro por nodo si usas los `...HoldDb`.** Esos dos campos se
+reinician en la lectura que los entrega, así que dos maestros sondeando el
+mismo nodo se repartirían los impulsos y ninguno vería la serie completa. Con
+varios lectores, que solo uno mande `CMD_GET_DATA`; `CMD_GET_STATUS` y
+`CMD_GET_METADATA` no consumen nada. El nodo solo rearma cuando sirve
+`status = 1`, así que sondear incondicionalmente no tira nada.
+
 **Por qué la validación triple.** Una lectura completa no basta: el esclavo I2C
 de arduino-esp32 puede rellenar con padding una respuesta corta y hacer que
 `requestFrom` devuelva la longitud completa. Y un esclavo con el muestreo
@@ -117,6 +124,8 @@ Slave side: ESP32-C3 → SDA GPIO 8 / SCL GPIO 10; XIAO ESP32-S3 → SDA GPIO 5 
 **The clock must be sent, as a LOCAL epoch.** The `setNodeTime()` call is commented out on purpose — only you know your time source. Leave it commented and the node never gets a clock: metadata reports `time_synced = 0` and **Ld, Le, Ln and Lden stay 0 forever**. The node applies no timezone of its own, so send **local time, not UTC**, and resend it after each DST change; sending UTC shifts every period index by one or two hours with no warning.
 
 **Frame integrity (3.3.1).** The 88 bytes end in a CRC-16 covering everything before it. Check it before publishing: the layout guards catch a shifted struct and `cycles` catches a frozen node, but a frame corrupted in transit can arrive with `status = 1` and an advancing `cycles` and would pass both.
+
+**One master per node if you use the `...HoldDb` fields.** They are reset by the read that delivers them, so two masters polling the same node would split the impulses between them and neither would see the full series. With several readers, let only one send `CMD_GET_DATA`; `CMD_GET_STATUS` and `CMD_GET_METADATA` consume nothing. The node only rearms when it serves `status = 1`, so polling unconditionally loses nothing.
 
 **Impulsive noise: use the `...HoldDb` fields.** `noiseLASmaxDb` and `noiseLCpeakDb` are maxima over the last second only, so a master polling every 5 s throws away four seconds in five in the very indicator meant to catch impulses. `noiseLASmaxHoldDb` and `noiseLCpeakHoldDb` hold the maximum since your previous read and are reset by it.
 

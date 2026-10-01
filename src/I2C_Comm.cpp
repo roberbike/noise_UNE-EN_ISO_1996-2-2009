@@ -17,6 +17,7 @@
 #include <sys/time.h>
 #include <freertos/queue.h>
 #include <Preferences.h>
+#include "NodeLog.h"
 
 QueueHandle_t dataQueue = NULL;
 SensorData cachedSensorData = {0};
@@ -60,8 +61,8 @@ void I2C_Comm_Service() {
         struct timeval tv = {(long)ts, 0};
         settimeofday(&tv, NULL);
         meta_time_synced = 1; // #5: enable Ld/Le/Ln computation
-        Serial.printf("[TIME] Clock set from master: epoch %lu (local)\n",
-                      (unsigned long)ts);
+        NodeLog_Printf("[TIME] Clock set from master: epoch %lu (local)\n",
+                       (unsigned long)ts);
     }
 
     if (!calib_dirty) return;
@@ -70,7 +71,7 @@ void I2C_Comm_Service() {
     prefs.begin("noise", false);
     prefs.putFloat("calib_db", v);
     prefs.end();
-    Serial.printf("[CALIB] Offset saved to NVS: %.2f dB\n", v);
+    NodeLog_Printf("[CALIB] Offset saved to NVS: %.2f dB\n", v);
 }
 
 // Guards cachedSensorData/cachedMicOk: I2C_Comm_Sync (task context) copies the
@@ -212,13 +213,21 @@ void requestEvent() {
     // the latches at this second's values so they are never left reporting 0.
     snap.noiseLASmaxHoldDb = hold_primed ? hold_lasmax_db : snap.noiseLASmaxDb;
     snap.noiseLCpeakHoldDb = hold_primed ? hold_lcpeak_db : snap.noiseLCpeakDb;
-    if (cmd == CMD_GET_DATA) {
+    // Consume them only on a read the master can actually use. A master that
+    // polls unconditionally still gets status = 0 while the node is not ready,
+    // discards the frame, and would otherwise have thrown away every impulse
+    // accumulated before that invalid second. Rearming only when status = 1
+    // makes the latches lossless from the master's point of view.
+    if (cmd == CMD_GET_DATA && status == 1) {
         hold_lasmax_db = snap.noiseLASmaxDb;
         hold_lcpeak_db = snap.noiseLCpeakDb;
     }
     portEXIT_CRITICAL_SAFE(&cacheMux);
 
     // #A5 Stamp the integrity field last, so it covers the hold values too.
+    // Bitwise over 84 bytes is ~10-20 us here, inside the slave callback and
+    // before the TX FIFO is filled. Negligible at one read per second; if a
+    // master ever polls at tens of Hz, swap in a 256-entry table.
     snap.reserved = 0;
     snap.crc16 = sensordata_crc16(&snap, SENSORDATA_CRC_LEN);
 

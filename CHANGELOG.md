@@ -88,6 +88,19 @@ out: the master sends LOCAL epoch and the node applies no timezone of its own.
   la escritura, que ahora sí es desalojable. Una cola llena **descarta** la
   línea: un log nunca debe retrasar una medida. De paso `loop()` deja de estar
   aparcada y hace algo útil, sin dejar de bloquearse en vez de girar en vacío.
+- **Los latches de impulsivos se consumían en lecturas que el maestro
+  descarta.** `CMD_GET_DATA` rearmaba `noiseLASmaxHoldDb`/`noiseLCpeakHoldDb`
+  en cualquier lectura, incluida una servida con `status = 0`: un maestro que
+  sondee incondicionalmente tiraba así todos los impulsos acumulados antes de
+  ese segundo inválido. Ahora el rearme ocurre **solo cuando el nodo sirve
+  `status = 1`**, de modo que los latches son sin pérdidas desde el punto de
+  vista del maestro. El único caso irrecuperable es una trama con CRC malo: el
+  nodo no puede saber que el maestro la descartó.
+- Las dos últimas líneas de log fuera de `NodeLog` (`[TIME]` y `[CALIB]`, en
+  `I2C_Comm_Service()`, que corre en la tarea del agregador) pasan también por
+  la cola diferida. Son eventos raros y el impacto era nulo, pero no tenía
+  sentido dejar dos escrituras bloqueantes en el único sitio del que se habían
+  sacado todas las demás.
 - **Nit · `window_fill` se congelaba en rachas de segundos inválidos**, porque
   solo se publicaba dentro de la puerta de validez. Ahora se recalcula y se
   publica cada segundo: durante una racha el recuento baja de verdad conforme
@@ -100,6 +113,19 @@ out: the master sends LOCAL epoch and the node applies no timezone of its own.
 
 ### Documentación
 
+- **`CMD_GET_DATA` es de un solo maestro**, y ahora lo dice. Los campos
+  `...HoldDb` son destructivos: el nodo los reinicia en la lectura que los
+  entrega, así que dos maestros sondeando el mismo nodo se repartirían los
+  impulsos y ninguno vería la serie completa. Con varios lectores, que solo
+  uno mande `CMD_GET_DATA`; `CMD_GET_STATUS` y `CMD_GET_METADATA` no consumen
+  nada. Documentado en `docs/COMUNICACION.md` y en el README del ejemplo.
+- `reserved` queda documentado como lo que es: relleno a 0 para que
+  `sizeof(SensorData)` sea determinista, **no cubierto por el CRC** (va detrás
+  de él) y sin significado alguno. Un maestro no debe interpretarlo.
+- El comentario del CRC anota cuándo dejaría de ser gratis: bit a bit sobre 84
+  bytes son ~10-20 µs dentro del callback, irrelevante a una lectura por
+  segundo; con un sondeo de decenas de Hz tocaría meter la tabla de 256
+  entradas.
 - El comentario del filtro C a 16 kHz recoge ahora el **trade-off de
   aliasado**, que faltaba. Son filtros digitales: actúan después del muestreo,
   así que ponderan una componente aliasada a la frecuencia en la que

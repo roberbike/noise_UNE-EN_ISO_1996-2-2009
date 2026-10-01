@@ -178,6 +178,28 @@ justo en los dos indicadores que existen para cazar impulsos. Los campos
 sea el periodo de sondeo. Tras reiniciarse llevan el valor del último segundo,
 nunca 0.
 
+**`CMD_GET_DATA` es de un solo maestro.** Los campos `noiseLASmaxHoldDb` y
+`noiseLCpeakHoldDb` son **destructivos**: el nodo los reinicia en la misma
+lectura que los entrega. Eso los hace exactos para un maestro, pero significa
+que **dos maestros sondeando el mismo nodo se robarían los máximos entre sí**:
+cada uno recibiría solo los impulsos ocurridos desde la lectura del otro, y
+ninguno de los dos vería la serie completa. Si necesitas varios lectores, que
+solo uno use `CMD_GET_DATA` y los demás se queden en `CMD_GET_STATUS` y
+`CMD_GET_METADATA`, que no consumen nada; o ignora los campos `...HoldDb` y
+quédate con los de último segundo, que no son destructivos. El resto de los
+campos de `SensorData` se puede leer desde tantos maestros como quieras.
+
+El rearme ocurre **solo cuando el nodo sirve `status = 1`**. Un maestro que
+sondee incondicionalmente sigue recibiendo `status = 0` mientras el nodo no
+está listo y descarta la trama, sin que eso tire los impulsos acumulados antes
+de ese segundo inválido. El único caso en que se pierde algo es una trama con
+CRC malo: el nodo no puede saber que el maestro la descartó.
+
+**`reserved` no lo interpretes.** Son los dos últimos bytes de la trama, van
+detrás del CRC y por tanto **no están cubiertos por él**; el nodo los pone a 0.
+Existen solo para que `sizeof(SensorData)` sea determinista frente al relleno
+del compilador. No les des significado ni los uses como campo libre.
+
 **`lden_periods` / `lden_minutes`: sobre qué se apoya el Lden.** El nodo
 publica Lden desde el primer segundo válido, así que a las 07:00:02 ya hay un
 "Lden (24 h)" calculado con dos segundos de día. Estos dos campos dicen qué
