@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [3.3.2] - 2026-10-03
+
+### Changed
+
+- Updated library metadata to describe both the ESP32-C3/MAX4466 and
+  ESP32-S3/ICS-43434 sensor nodes and their current noise indicators.
+
 ## [3.3.1] - 2026-10-01 (external review fixes)
 
 Fixes from an independent review (DeepSeek). Items already resolved in 3.3.0
