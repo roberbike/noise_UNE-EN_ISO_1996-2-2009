@@ -1,21 +1,39 @@
 /**
- * Verification firmware — XIAO ESP32-S3 + ICS-43434 node (I2S)
+ * Calibration firmware — XIAO ESP32-S3 + ICS-43434 node (I2S)
  * Noise monitor (UNE-EN ISO 1996-2, Decree 213/2012)
  *
- * Runs only the measurement chain (I2S + A-weighting + RMS) and prints the RMS
- * level (dBFS) and LAeq (dB) every second over Serial. It does not use I2C.
+ * Runs only the measurement chain (I2S + A-weighting + RMS) and prints, every
+ * second, the A-weighted and unweighted RMS in dBFS, the LAeq, and the
+ * MIC_OFFSET_DB value the main firmware would need. It does not use I2C.
  *
- * Unlike the MAX4466, the ICS-43434 has factory-specified sensitivity
- * (-26 dBFS @ 94 dB SPL), so the displayed LAeq should already be correct
- * (typically within ±1 dB of the microphone tolerance) without a calibrator.
+ * IMPORTANT: this sketch mirrors the main firmware's conversion EXACTLY —
+ * same sample rate, same A-weighting coefficients, same peak-to-RMS term. If
+ * the two ever diverge, the trim derived here is wrong by the difference.
+ * Earlier versions of this example got all three wrong at once (16 kHz against
+ * the node's 48 kHz, the superseded A coefficients, and no peak-to-RMS term),
+ * which is how a measured 106.5 dB turned into a trim 3 dB off.
+ *
+ * It applies NO trim of its own, by design: its job is to show the untrimmed
+ * level so the trim can be derived from it.
  *
  * Usage:
  * 1. Connect the ICS-43434: SCK → GPIO2 (D1), WS → GPIO3 (D2), SD → GPIO4 (D3),
  *    VDD 3.3V, GND, L/R → GND.
  * 2. Flash this firmware and open the Serial Monitor at 115200 baud.
- * 3. Verification with a 94 dB calibrator (1 kHz): couple the microphone and note the stable LAeq.
- * 4. If it differs from 94.0, the fine adjustment is MIC_OFFSET_DB = 94.0 - measured_LAeq,
- *    to be defined in the main firmware build_flags.
+ * 3. Couple a 94.0 dB / 1 kHz calibrator to the microphone port and let the
+ *    reading settle for a few seconds.
+ * 4. Copy the printed MIC_OFFSET_DB into the main firmware's build_flags.
+ *    Do NOT compute it by hand as "94 - LAeq": that only holds if this sketch
+ *    and the firmware share the same conversion, which is what the printed
+ *    value already accounts for.
+ * 5. Verify in free field against a reference sound level meter. A calibrator
+ *    designed for a 1/2" capsule, coupled to a MEMS port in a small cavity,
+ *    delivers more SPL than nominal, so step 4 alone can over-correct.
+ *
+ * Note on the two RMS figures: dBFS(A) is what the main firmware's log line
+ * reports; dBFS(Z) is unweighted and includes low-frequency rumble that
+ * A-weighting removes, so it reads higher in a real room. Use dBFS(A) when
+ * comparing against the firmware.
  */
 
 /*
@@ -38,26 +56,60 @@
 #include <freertos/FreeRTOS.h>
 #include "driver/i2s.h"
 
-// --- Configuration (same as the main firmware) ---
+// --- Configuration (must match the main firmware) ---
 #define MIC_BCLK 2
 #define MIC_WS 3
 #define MIC_DIN 4
-#define SAMPLE_RATE 16000
+
+// The S3 environment of the main firmware builds with -D SAMPLE_RATE=48000.
+// Keep this in step with it: the A-weighting coefficients below are selected
+// by this value, and measuring at a different rate changes both the weighting
+// and the aliasing.
+#ifndef SAMPLE_RATE
+#define SAMPLE_RATE 48000
+#endif
+#if SAMPLE_RATE != 16000 && SAMPLE_RATE != 48000
+#error "SAMPLE_RATE must be 16000 or 48000 (coefficient sets available)"
+#endif
+
 #define READ_LEN 256
 
-#define MIC_SENSITIVITY_DBFS (-26.0f) // ICS-43434: -26 dBFS @ 94 dB SPL
+#define MIC_SENSITIVITY_DBFS (-26.0f) // ICS-43434 datasheet, on the sine PEAK
 #define MIC_REF_DB 94.0f
 
-// --- A-weighting filter (16 kHz) ---
+// Peak-to-RMS correction. The datasheet specifies sensitivity on the PEAK of a
+// sine (94 dB SPL "peaks at -26 dB below full scale") and what we feed in is an
+// RMS amplitude; for a sine the two differ by 20*log10(sqrt(2)). The AOP
+// confirms the peak reading: 120 dB SPL and -26 dBFS differ by exactly 26 dB,
+// which only works if full scale is reached by the peak of a 120 dB sine.
+// The main firmware applies this as MIC_PEAK_TO_RMS_DB; without it here, every
+// level this sketch printed was 3.01 dB below what the firmware would publish.
+#define MIC_PEAK_TO_RMS_DB 3.0103f
+
+// Reference level the calibrator produces, for the suggested-trim line.
+#define CALIBRATOR_DB 94.0f
+
+// --- A-weighting filter, same coefficients as src/DSP_Engine.cpp ---
 struct Biquad {
   float b0, b1, b2, a1, a2;
   float z1, z2;
 };
 
+#if SAMPLE_RATE == 48000
+// 48 kHz. Verified vs IEC 61672-1: |err| < 0.6 dB up to 8 kHz.
+static Biquad aWeightingFilters[3] = {
+    {0.23418304f, 0.46836609f, 0.23418304f, -0.22455846f, 0.01260663f, 0, 0},
+    {1.00000000f, -2.00000000f, 1.00000000f, -1.89387049f, 0.89515977f, 0, 0},
+    {1.00000000f, -2.00000000f, 1.00000000f, -1.99461446f, 0.99462171f, 0, 0}};
+#else
+// 16 kHz, third section refitted by least squares (|err| < 0.15 dB to 7.9 kHz).
+// The previous set here kept the old third section, whose response collapsed
+// above 5 kHz — fine at 1 kHz for a calibrator, wrong for anything broadband.
 static Biquad aWeightingFilters[3] = {
     {0.529093f, -1.058186f, 0.529093f, -1.983887f, 0.983952f, 0, 0},
     {1.000000f, -2.000000f, 1.000000f, -1.705510f, 0.715988f, 0, 0},
-    {1.000000f, 2.000000f, 1.000000f, 0.821564f, 0.168742f, 0, 0}};
+    {-0.36654287f, 1.61495515f, 0.72597221f, 0.05375630f, -0.07418460f, 0, 0}};
+#endif
 
 static float applyFilter(float in, Biquad &f) {
   float out = in * f.b0 + f.z1;
@@ -72,7 +124,8 @@ static float dc_offset = 0.0f;
 void setup() {
   Serial.begin(115200);
   delay(1000);
-  Serial.println("[INIT] Verification ICS-43434 (I2S) - XIAO ESP32-S3");
+  Serial.printf("[INIT] Calibration ICS-43434 (I2S) - XIAO ESP32-S3 @ %d Hz\n",
+                SAMPLE_RATE);
 
   i2s_config_t cfg = {};
   cfg.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX);
@@ -83,7 +136,7 @@ void setup() {
   cfg.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
   cfg.dma_buf_count = 6;
   cfg.dma_buf_len = READ_LEN;
-  cfg.use_apll = false; // ESP32-S3 no tiene APLL
+  cfg.use_apll = false; // the ESP32-S3 has no APLL
 
   i2s_pin_config_t pins = {};
   pins.mck_io_num = I2S_PIN_NO_CHANGE;
@@ -94,7 +147,7 @@ void setup() {
 
   if (i2s_driver_install(I2S_NUM_0, &cfg, 0, NULL) != ESP_OK ||
       i2s_set_pin(I2S_NUM_0, &pins) != ESP_OK) {
-    Serial.println("[ERR] Fallo al iniciar I2S");
+    Serial.println("[ERR] I2S driver install failed");
     while (1) delay(1000);
   }
   i2s_zero_dma_buffer(I2S_NUM_0);
@@ -105,7 +158,9 @@ void setup() {
   while (millis() - t0 < 500) {
     i2s_read(I2S_NUM_0, raw, sizeof(raw), &br, portMAX_DELAY);
   }
-  Serial.println("[INIT] Capturing. LAeq and RMS(dBFS) every second:");
+  Serial.println("[INIT] Capturing. One line per second:");
+  Serial.printf("[INIT] Conversion: SPL = %.1f + 20*log10(rms) + %.1f + %.4f\n",
+                MIC_REF_DB, -MIC_SENSITIVITY_DBFS, MIC_PEAK_TO_RMS_DB);
 }
 
 void loop() {
@@ -136,10 +191,17 @@ void loop() {
   float rms_Z = sqrtf((float)(sum_sq_Z / count));
 
   if (rms_A > 0.0f) {
-    float laeq = MIC_REF_DB + 20.0f * log10f(rms_A) - MIC_SENSITIVITY_DBFS;
-    float dbfs = 20.0f * log10f(rms_Z);
-    Serial.printf("LAeq: %.1f dB | RMS: %.1f dBFS\n", laeq, dbfs);
+    float dbfs_A = 20.0f * log10f(rms_A);
+    float dbfs_Z = 20.0f * log10f(rms_Z);
+    // Identical to the main firmware's i2s_fs_to_db(), minus the trims.
+    float laeq = MIC_REF_DB + dbfs_A - MIC_SENSITIVITY_DBFS + MIC_PEAK_TO_RMS_DB;
+    // What the firmware's build_flags would need for a calibrator reading.
+    // Only meaningful while the calibrator is actually coupled.
+    float offset = CALIBRATOR_DB - laeq;
+    Serial.printf("LAeq: %.2f dB | dBFS(A): %.2f | dBFS(Z): %.2f | "
+                  "if calibrator: MIC_OFFSET_DB=%.2f\n",
+                  laeq, dbfs_A, dbfs_Z, offset);
   } else {
-    Serial.println("[WARN] Absolute silence: check SD line and L/R->GND");
+    Serial.println("[WARN] Absolute silence: check the SD line and L/R->GND");
   }
 }

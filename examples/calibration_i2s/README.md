@@ -27,30 +27,55 @@ medir. Al aire funciona por el pull-down interno, pero en campo debe ir a masa.
 
 1. Compilar y flashear: entorno `seeed_xiao_esp32s3`.
 2. Abrir Monitor Serie a 115200 baud.
-3. El LAeq mostrado ya es dB SPL directos (sensibilidad de fábrica -26 dBFS @ 94 dB SPL).
-4. Verificación opcional con calibrador acústico a 94 dB (1 kHz): acoplar el
-   micrófono y anotar el LAeq estable. Si difiere de 94.0, definir en el firmware
-   principal `-D MIC_OFFSET_DB=<94.0 - LAeq_medido>` en `build_flags`.
+3. Acoplar un calibrador de **94,0 dB / 1 kHz** al puerto del micrófono y
+   dejar que la lectura se estabilice unos segundos.
+4. Copiar el valor de `MIC_OFFSET_DB` que imprime la propia línea al
+   `build_flags` del firmware principal. **No lo calcules a mano como
+   `94 − LAeq`**: eso solo vale si este sketch y el firmware comparten la
+   misma conversión, que es justo lo que el valor impreso ya tiene en cuenta.
+5. Contrastar en **campo libre** contra un sonómetro de referencia. Un
+   calibrador diseñado para cápsula de 1/2" acoplado a un puerto MEMS en una
+   cavidad pequeña entrega más SPL que el nominal, así que el paso 4 por sí
+   solo puede sobrecorregir.
+
+**Este sketch replica la conversión del firmware exactamente**: mismo sample
+rate (48 kHz), mismos coeficientes de ponderación A y mismo término
+pico→RMS (+3,0103 dB). Si alguna vez divergen, el trim que salga de aquí
+estará equivocado en esa diferencia. Versiones anteriores de este ejemplo
+fallaban en las tres cosas a la vez —16 kHz frente a los 48 kHz del nodo, los
+coeficientes A antiguos y sin el término pico→RMS—, y así un 106,5 dB medido
+se convertía en un trim 3 dB desviado.
+
+No aplica ningún trim propio, a propósito: su trabajo es mostrar el nivel sin
+corregir para poder derivarlo.
+
+**Las dos cifras de RMS.** `dBFS(A)` es lo que publica la línea de log del
+firmware; `dBFS(Z)` es sin ponderar e incluye el retumbe de baja frecuencia que
+la ponderación A quita, así que en una sala real sale más alto. Para comparar
+contra el firmware, usa `dBFS(A)`.
 
 ## Resultado esperado
 
-Suelo de ruido en interior tranquilo: **~34 dB**, con variación segundo a
-segundo (frente a ~58-60 dB clavados del nodo MAX4466). Ejemplo real:
+Este sketch imprime el nivel **sin corregir**, así que sus LAeq salen más altos
+que los del firmware en la misma sala: la diferencia es exactamente el
+`MIC_OFFSET_DB` que acabes poniendo. Una línea por segundo:
 
 ```
-[ICS43434] LAeq:34.8 | LAFmx:36.1 | L10:34.9 | L90:34 | RMS:55uFS | Lden:0.0 | clip:0 | cyc:21
-[ICS43434] LAeq:40.7 | LAFmx:47.2 | L10:34.7 | L90:34 | RMS:108uFS | Lden:0.0 | clip:0 | cyc:22
+LAeq: 54.70 dB | dBFS(A): -68.31 | dBFS(Z): -59.40 | if calibrator: MIC_OFFSET_DB=39.30
+LAeq: 108.28 dB | dBFS(A): -14.73 | dBFS(Z): -13.46 | if calibrator: MIC_OFFSET_DB=-14.28
 ```
 
-El significado de cada indicador (LAeq, LAFmax, L10, L90, Lden) está en el
-README principal, sección "Qué significan las medidas".
+La primera línea es una sala tranquila (unos 41 dB reales una vez aplicado el
+trim); la segunda, con el calibrador de 94,0 dB acoplado. **La columna
+`MIC_OFFSET_DB` solo significa algo en la segunda situación** — con el
+calibrador puesto. En ambiente da un número sin sentido, porque el sketch no
+sabe a qué nivel estás realmente.
 
-Notas sobre esa salida:
-- **L10/L90 se mantienen constantes** entre bloques: se recalculan cada 20 s
-  completos y conservan el valor del último bloque.
-- **Lden = 0.0** es correcto aquí: requiere hora válida en el nodo, que llega
-  del master vía comando legacy de set-time. En el firmware autónomo nunca se
-  puebla.
+Nota sobre las unidades: estas unidades leen muy por encima de lo que implica
+su hoja de datos. Un ICS-43434 que cumpliera los −26 dBFS daría
+`dBFS(A) ≈ -29` con el calibrador y un `MIC_OFFSET_DB` cercano a 0; las
+medidas reales dan unos 14 dB más de nivel. Mide antes de dar por bueno
+cualquier valor, incluido el que trae el firmware.
 
 ## Diagnóstico
 
@@ -91,19 +116,28 @@ Labels follow the silkscreen of the MRS179A breakout (photo). Other modules use 
 
 1. Compile and flash: `seeed_xiao_esp32s3` environment.
 2. Open the Serial Monitor at 115200 baud.
-3. The LAeq shown is already direct dB SPL (factory sensitivity -26 dBFS @ 94 dB SPL).
-4. Optional verification with a 94 dB acoustic calibrator (1 kHz): couple the microphone and note the stable LAeq value. If it differs from 94.0, set `-D MIC_OFFSET_DB=<94.0 - measured_LAeq>` in the main firmware `build_flags`.
+3. Couple a **94.0 dB / 1 kHz** calibrator to the microphone port and let the reading settle for a few seconds.
+4. Copy the `MIC_OFFSET_DB` value the line itself prints into the main firmware's `build_flags`. **Do not compute it by hand as `94 - LAeq`**: that only holds if this sketch and the firmware share the same conversion, which is exactly what the printed value already accounts for.
+5. Verify in **free field** against a reference sound level meter. A calibrator designed for a 1/2" capsule, coupled to a MEMS port in a small cavity, delivers more SPL than nominal, so step 4 alone can over-correct.
+
+**This sketch mirrors the firmware's conversion exactly**: same sample rate (48 kHz), same A-weighting coefficients, same peak-to-RMS term (+3.0103 dB). If the two ever diverge, the trim derived here is wrong by the difference. Earlier versions of this example got all three wrong at once — 16 kHz against the node's 48 kHz, the superseded A coefficients, and no peak-to-RMS term — which is how a measured 106.5 dB turned into a trim 3 dB off.
+
+It applies no trim of its own, by design: its job is to show the untrimmed level so the trim can be derived from it.
+
+**The two RMS figures.** `dBFS(A)` is what the firmware's log line reports; `dBFS(Z)` is unweighted and includes low-frequency rumble that A-weighting removes, so it reads higher in a real room. Use `dBFS(A)` when comparing against the firmware.
 
 ## Expected result
 
-Quiet indoor noise floor: **~34 dB**, with second-to-second variation (as opposed to ~58–60 dB of the MAX4466 node). Example real output:
+This sketch prints the **untrimmed** level, so its LAeq reads higher than the firmware's in the same room — the difference is exactly the `MIC_OFFSET_DB` you end up setting. One line per second:
 
 ```text
-[ICS43434] LAeq:34.8 | LAFmx:36.1 | L10:34.9 | L90:34 | RMS:55uFS | Lden:0.0 | clip:0 | cyc:21
-[ICS43434] LAeq:40.7 | LAFmx:47.2 | L10:34.7 | L90:34 | RMS:108uFS | Lden:0.0 | clip:0 | cyc:22
+LAeq: 54.70 dB | dBFS(A): -68.31 | dBFS(Z): -59.40 | if calibrator: MIC_OFFSET_DB=39.30
+LAeq: 108.28 dB | dBFS(A): -14.73 | dBFS(Z): -13.46 | if calibrator: MIC_OFFSET_DB=-14.28
 ```
 
-The meaning of each indicator (LAeq, LAFmax, L10, L90, Lden) is described in the main README under "What the measurements mean".
+The first line is a quiet room (about 41 dB once the trim is applied); the second has a 94.0 dB calibrator coupled. **The `MIC_OFFSET_DB` column only means anything in the second case** — with the calibrator on. In ambient it prints a meaningless number, because the sketch has no idea what level you are actually in.
+
+A note on the parts: these units read far above what their datasheet implies. An ICS-43434 meeting its −26 dBFS spec would give `dBFS(A) ≈ -29` with the calibrator and a `MIC_OFFSET_DB` near 0; real measurements come out about 14 dB hotter. Measure before trusting any value, including the one the firmware ships with.
 
 ## Diagnosis
 

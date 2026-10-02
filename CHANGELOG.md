@@ -54,28 +54,46 @@ out: the master sends LOCAL epoch and the node applies no timezone of its own.
   3,01 dB.** Los umbrales del comentario #B5 se recalculan en consecuencia
   (1e-5 FS pasa de 20,0 a 23,0 dB SPL; el suelo del micrófono queda en
   33-37 dB SPL).
-- **A1 · `MIC_OFFSET_DB` vuelve a 0.** El ⋅10,7 dB del nodo digital era un
-  parche de campo heredado: estaba compensando —y de más— el error de 3,01 dB
-  de A2, y 10,7 dB es diez veces la tolerancia ±1 dB del ICS-43434, así que no
-  podía ser dispersión de la pieza. Con la constante del datasheet ya correcta,
-  la conversión da el nivel bueno por sí sola y el trim de compilación no hace
-  falta. Para un ajuste por unidad lo correcto es `CMD_SET_CALIB` (0x0A), que
-  persiste en NVS y no obliga a reflashear.
+- **A1 · `MIC_OFFSET_DB` = −13,71 dB.** Reproduce exactamente el total de la
+  3.3.0, que es la única configuración verificada contra calibrador: la 3.3.0
+  tal como se publicó marca **93,8-94,0 dB con un calibrador de 94,0**.
 
-  > **ATENCIÓN, esto mueve los niveles publicados.** Entre A2 (+3,01) y este
-  > cambio (+10,7), el nodo digital pasa a leer **+13,71 dB** respecto a
-  > v3.3.0. Un calibrador de 94,0 dB leía 80,29 dB y ahora lee 94,00. La serie
-  > histórica del nodo S3 en Grafana tendrá un escalón de 13,71 dB en el
-  > momento del flasheo: hay que anotarlo, y los datos anteriores de ese nodo
-  > no son comparables con los posteriores sin sumarles esos 13,71 dB. El nodo
-  > analógico (C3/MAX4466) **no** se ve afectado: su cadena de calibración es
-  > independiente y no cambia.
+  `K = 26 + MIC_PEAK_TO_RMS_DB + MIC_OFFSET_DB`, y hace falta K = +15,30:
+  la 3.3.0 lo conseguía con 26 − 10,70, y aquí sale de 26 + 3,0103 − 13,71.
+  La condición es sobre K, no sobre el trim suelto: sin el término #A2 el trim
+  volvería a ser −10,70.
 
-  Comprobación sin sonómetro, con un calibrador de 94,0 dB: el campo `raw
-  noise` debe salir en ~35 400 µFS — es independiente del trim y de la
-  constante, así que valida la extracción de los 24 bits del I2S— y el LAeq
-  en ~94,0 dB. Si el raw sale muy distinto de 35 400, el problema no es ninguna
-  de las dos cosas sino el desplazamiento de bits.
+  Con el trim a 0 (K = +29,01) el calibrador marcaba **106,5 dB**, 12,6 dB
+  alto. Estos micrófonos entregan mucho más nivel del que implica su hoja de
+  datos — del orden de −15 dBFS de RMS a 94 dB SPL frente a los −29,01 que
+  saldrían de la sensibilidad de −26 dBFS especificada sobre el **pico** de la
+  senoide — y el motivo de fondo sigue sin explicar.
+
+  **No es un fallo de firmware**, y se comprobó en las dos versiones ejecutando
+  el propio `DSP_ApplyFilter` del repositorio: 0,000 dB de ganancia a 1 kHz en
+  ambas y en los dos rates, ±0,54 dB hasta 8 kHz frente a IEC 61672-1,
+  normalización `s24 / 2^23`, `mean_sq = sum_sq_A / samples_count` y `begin()`
+  idéntico. La única diferencia de nivel entre 3.3.0 y 3.3.1 son los
+  +3,0103 dB de #A2.
+
+  Tres valores equivocados precedieron a este y quedan anotados en
+  `platformio.ini` para que no se repitan: **0**, de la conjetura de que el
+  −10,7 compensaba el error de 3 dB de #A2 y sobraba al arreglarlo (la
+  aritmética nunca lo sostuvo: 10,7 no es una compensación de 3,01);
+  **−15,55**, de tomar al pie de la letra un print de RMS de −13,46 dBFS, que
+  se pasa 1,8 dB respecto a la configuración verificada; y **−10,7**, correcto
+  para la fórmula sin #A2 pero no con él.
+
+### Added
+
+- **RMS en dBFS en la línea de log del nodo digital.** Es el único campo que no
+  depende del trim ni de la constante de sensibilidad — es la salida cruda del
+  micrófono — así que convierte la calibración de campo en una sola lectura:
+  calibrador de 94,0 dB en el puerto, se anota el valor, y el total necesario
+  es K = −rms_dBFS.
+
+### Fixed
+
 - **R3 · Muestreo no uniforme en el C3.** El agregador corre a prioridad alta y
   llamaba a `Serial.printf()` directamente; a 115200 baudios esa línea de
   estado son ~110 caracteres, es decir ~9,5 ms de escritura bloqueante que

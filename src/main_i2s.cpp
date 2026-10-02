@@ -33,10 +33,13 @@
  * I2S digital MEMS front-end; the per-second acoustic math lives in the shared
  * NoiseAggregator (same code path as the ADC node in main.cpp). Level comes
  * from dBFS via the mic sensitivity spec (-26 dBFS @ 94 dB SPL, peak -> RMS
- * corrected, see MIC_PEAK_TO_RMS_DB). MIC_OFFSET_DB is a compile-time trim and
- * starts at 0: the conversion is correct on its own, so a node needs no trim
- * to read the right level. For a per-unit adjustment prefer CMD_SET_CALIB,
- * which persists in NVS and needs no reflash.
+ * corrected, see MIC_PEAK_TO_RMS_DB). MIC_OFFSET_DB is a field trim and is NOT
+ * zero: these parts read far hotter than the datasheet sensitivity, and the
+ * value in platformio.ini reproduces the only configuration verified against
+ * a calibrator (3.3.0, which reads 93.8-94.0 dB on a 94.0 dB calibrator). See
+ * platformio.ini for the derivation and the three wrong values that preceded
+ * it. For a per-unit adjustment on top, prefer CMD_SET_CALIB, which persists
+ * in NVS and needs no reflash.
  */
 
 #ifndef MIC_OFFSET_DB
@@ -241,10 +244,19 @@ void aggregator_task(void *pvParameters) {
                                   : (uint16_t)secData.clip_count); // #12
 
             if (valid) {
-                NodeLog_Printf("[ICS43434] LAeq:%.1f | LAFmx:%.1f | LASmx:%.1f | LCpk:%.1f | L10:%.1f | L90:%d | Lden:%.1f | clip:%u | cyc:%u\n",
+                // RMS in dBFS is printed alongside the levels because it is
+                // the one field that depends on NEITHER the trim nor the
+                // sensitivity constant: it is the mic's raw output. That makes
+                // field calibration a single reading — put a 94.0 dB
+                // calibrator on the port, note this value, and the required
+                // total is K = -rms_dBFS, with
+                // K = 26 + MIC_PEAK_TO_RMS_DB + MIC_OFFSET_DB.
+                float rms_dbfs = (out.noise > 0)
+                    ? 20.0f * log10f((float)out.noise / 1e6f) : -120.0f;
+                NodeLog_Printf("[ICS43434] LAeq:%.1f | LAFmx:%.1f | LASmx:%.1f | LCpk:%.1f | L10:%.1f | L90:%d | Lden:%.1f | RMS:%.1f dBFS | clip:%u | cyc:%u\n",
                               out.noiseAvgDb, out.noisePeakDb, out.noiseLASmaxDb,
                               out.noiseLCpeakDb, out.noiseAvgLegalDb,
-                              out.lowNoiseLevel, out.noiseLden,
+                              out.lowNoiseLevel, out.noiseLden, rms_dbfs,
                               (unsigned)secData.clip_count, (unsigned)out.cycles);
             } else if (!not_clipped) {
                 SerialLog("WARN", "Clipping detected: reading invalidated");
