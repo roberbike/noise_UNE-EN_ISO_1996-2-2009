@@ -22,7 +22,12 @@
  * 2. Flash this firmware and open the Serial Monitor at 115200 baud.
  * 3. Couple a 94.0 dB / 1 kHz calibrator to the microphone port and let the
  *    reading settle for a few seconds.
- * 4. Copy the printed MIC_OFFSET_DB into the main firmware's build_flags.
+ * 4. Check `sens` first. It is this unit's sensitivity referred to 94 dB SPL
+ *    and must come out the same whichever calibrator level you use. Measure at
+ *    94 and at 114 (rebuilding with -D CALIBRATOR_DB=114.0 for the latter): if
+ *    the two disagree, the coupling is not delivering the level the calibrator
+ *    is set to, and nothing derived from it is usable. Only if they agree,
+ *    copy the printed MIC_OFFSET_DB into the main firmware's build_flags.
  *    Do NOT compute it by hand as "94 - LAeq": that only holds if this sketch
  *    and the firmware share the same conversion, which is what the printed
  *    value already accounts for.
@@ -86,8 +91,13 @@
 // level this sketch printed was 3.01 dB below what the firmware would publish.
 #define MIC_PEAK_TO_RMS_DB 3.0103f
 
-// Reference level the calibrator produces, for the suggested-trim line.
+// Reference level the calibrator is SET TO. Standard acoustic calibrators
+// offer 94 and 114 dB; pass -D CALIBRATOR_DB=114.0 when using the high
+// setting, or the suggested trim comes out 20 dB wrong. It is printed on every
+// line so the figure can never be read against the wrong reference.
+#ifndef CALIBRATOR_DB
 #define CALIBRATOR_DB 94.0f
+#endif
 
 // --- A-weighting filter, same coefficients as src/DSP_Engine.cpp ---
 struct Biquad {
@@ -161,6 +171,11 @@ void setup() {
   Serial.println("[INIT] Capturing. One line per second:");
   Serial.printf("[INIT] Conversion: SPL = %.1f + 20*log10(rms) + %.1f + %.4f\n",
                 MIC_REF_DB, -MIC_SENSITIVITY_DBFS, MIC_PEAK_TO_RMS_DB);
+  Serial.printf("[INIT] Calibrator assumed at %.1f dB. Rebuild with "
+                "-D CALIBRATOR_DB=<level> if yours is set differently.\n",
+                (float)CALIBRATOR_DB);
+  Serial.printf("[INIT] sens is this unit's sensitivity referred to 94 dB SPL; "
+                "datasheet says %.1f dBFS.\n", MIC_SENSITIVITY_DBFS);
 }
 
 void loop() {
@@ -195,12 +210,20 @@ void loop() {
     float dbfs_Z = 20.0f * log10f(rms_Z);
     // Identical to the main firmware's i2s_fs_to_db(), minus the trims.
     float laeq = MIC_REF_DB + dbfs_A - MIC_SENSITIVITY_DBFS + MIC_PEAK_TO_RMS_DB;
-    // What the firmware's build_flags would need for a calibrator reading.
-    // Only meaningful while the calibrator is actually coupled.
-    float offset = CALIBRATOR_DB - laeq;
+    // What the firmware's build_flags would need, for the calibrator level
+    // this build was told about. Only meaningful while it is actually coupled.
+    float offset = (float)CALIBRATOR_DB - laeq;
+    // This unit's sensitivity referred to 94 dB SPL, on the sine peak, so it
+    // is directly comparable with the datasheet's -26 dBFS. Being referred to
+    // a fixed level makes it LEVEL-INDEPENDENT for a linear chain: measure at
+    // 94 and at 114 and it must come out the same. If it does not, the
+    // coupling is not delivering the level the calibrator is set to, and no
+    // trim derived from it is trustworthy -- go to a free-field comparison
+    // against a reference meter instead.
+    float sens = dbfs_A + MIC_PEAK_TO_RMS_DB - ((float)CALIBRATOR_DB - 94.0f);
     Serial.printf("LAeq: %.2f dB | dBFS(A): %.2f | dBFS(Z): %.2f | "
-                  "if calibrator: MIC_OFFSET_DB=%.2f\n",
-                  laeq, dbfs_A, dbfs_Z, offset);
+                  "sens: %.2f dBFS | @%.0fdB: MIC_OFFSET_DB=%.2f\n",
+                  laeq, dbfs_A, dbfs_Z, sens, (float)CALIBRATOR_DB, offset);
   } else {
     Serial.println("[WARN] Absolute silence: check the SD line and L/R->GND");
   }

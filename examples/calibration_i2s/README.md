@@ -29,10 +29,17 @@ medir. Al aire funciona por el pull-down interno, pero en campo debe ir a masa.
 2. Abrir Monitor Serie a 115200 baud.
 3. Acoplar un calibrador de **94,0 dB / 1 kHz** al puerto del micrófono y
    dejar que la lectura se estabilice unos segundos.
-4. Copiar el valor de `MIC_OFFSET_DB` que imprime la propia línea al
-   `build_flags` del firmware principal. **No lo calcules a mano como
-   `94 − LAeq`**: eso solo vale si este sketch y el firmware comparten la
-   misma conversión, que es justo lo que el valor impreso ya tiene en cuenta.
+4. **Mira primero la columna `sens`.** Es la sensibilidad de esta unidad
+   referida a 94 dB SPL, así que tiene que salir **igual con cualquier posición
+   del calibrador**. Mide en 94 y en 114 (recompilando con
+   `-D CALIBRATOR_DB=114.0` para la segunda): si las dos no coinciden, el
+   acoplamiento no está entregando el nivel que marca el calibrador y nada de
+   lo que salga de ahí sirve. Solo si coinciden, copia el `MIC_OFFSET_DB` que
+   imprime la línea al `build_flags` del firmware principal. **No lo calcules
+   a mano como `94 − LAeq`**: eso solo vale si este sketch y el firmware
+   comparten la misma conversión, que es justo lo que el valor impreso ya tiene
+   en cuenta. Y si usas la posición de 114 dB, **recompila con
+   `-D CALIBRATOR_DB=114.0`** o el valor sugerido saldrá 20 dB desviado.
 5. Contrastar en **campo libre** contra un sonómetro de referencia. Un
    calibrador diseñado para cápsula de 1/2" acoplado a un puerto MEMS en una
    cavidad pequeña entrega más SPL que el nominal, así que el paso 4 por sí
@@ -53,6 +60,41 @@ corregir para poder derivarlo.
 firmware; `dBFS(Z)` es sin ponderar e incluye el retumbe de baja frecuencia que
 la ponderación A quita, así que en una sala real sale más alto. Para comparar
 contra el firmware, usa `dBFS(A)`.
+
+## Usa la posición de 94 dB: por encima de ~106 dB este nodo satura
+
+Medido sobre una unidad real de este proyecto, con tres posiciones del
+calibrador:
+
+| Posición | `dBFS(A)` | pico | del fondo de escala |
+| :--- | ---: | ---: | ---: |
+| 94 dB | −15,21 | −12,20 | 0,25 |
+| 104 dB | −5,37 | −2,36 | **0,76** |
+| 114 dB | −9,01 | −6,00 | 0,50 |
+
+De 94 a 104 la cadena es **lineal**: la entrada subió 10,00 dB y la medida
+9,84. El acoplamiento y el firmware están bien.
+
+La posición de 114 es la que no vale, y la razón es el margen por arriba. Esta
+unidad tiene una sensibilidad de **−12,20 dBFS de pico a 94 dB SPL**, frente a
+los −26 dBFS del datasheet: entrega 13,8 dB más nivel. Eso se paga con 13,8 dB
+menos de rango útil, así que **el fondo de escala digital se alcanza a
+~106 dB SPL** en lugar de los 120 dB del AOP nominal del ICS-43434. A 114 dB
+el micrófono está unos 8 dB por encima de su fondo de escala, y su salida no
+recorta limpiamente sino que se degrada: por eso lee **menos** que en 104
+(−9,01 frente a −5,37) y por eso en esa meseta `dBFS(A)` y `dBFS(Z)` se
+separan 2,1 dB cuando en las otras dos coinciden — la onda ya está sucia.
+
+La predicción lo confirma: partiendo solo de la medida de 94 dB, a 104 dB
+corresponde un pico de 0,78 del fondo de escala y se midió **0,76**. A 114 dB
+corresponderían 2,45 veces el fondo de escala, que es imposible.
+
+**En la práctica:** calibra con la posición de **94 dB** y nada más. Y ten
+presente el techo al desplegar — un nodo que satura a ~106 dB no puede medir
+eventos más fuertes, y el `LCpeak` de un impulso sí puede pasarse de ahí. El
+contador `clip` del firmware (umbral 0,99 de fondo de escala) marca el segundo
+como inválido cuando eso ocurre, así que la sobrecarga queda señalada en lugar
+de publicarse como una medida buena.
 
 ## Resultado esperado
 
@@ -117,7 +159,7 @@ Labels follow the silkscreen of the MRS179A breakout (photo). Other modules use 
 1. Compile and flash: `seeed_xiao_esp32s3` environment.
 2. Open the Serial Monitor at 115200 baud.
 3. Couple a **94.0 dB / 1 kHz** calibrator to the microphone port and let the reading settle for a few seconds.
-4. Copy the `MIC_OFFSET_DB` value the line itself prints into the main firmware's `build_flags`. **Do not compute it by hand as `94 - LAeq`**: that only holds if this sketch and the firmware share the same conversion, which is exactly what the printed value already accounts for.
+4. **Check the `sens` column first.** It is this unit's sensitivity referred to 94 dB SPL, so it must come out **the same whichever calibrator level you use**. Measure at 94 and at 114 (rebuilding with `-D CALIBRATOR_DB=114.0` for the latter): if the two disagree, the coupling is not delivering the level the calibrator is set to and nothing derived from it is usable. Only if they agree, copy the printed `MIC_OFFSET_DB` into the main firmware's `build_flags`. **Do not compute it by hand as `94 - LAeq`**: that only holds if this sketch and the firmware share the same conversion, which is exactly what the printed value already accounts for. And if you use the 114 dB setting, **rebuild with `-D CALIBRATOR_DB=114.0`** or the suggested value comes out 20 dB wrong.
 5. Verify in **free field** against a reference sound level meter. A calibrator designed for a 1/2" capsule, coupled to a MEMS port in a small cavity, delivers more SPL than nominal, so step 4 alone can over-correct.
 
 **This sketch mirrors the firmware's conversion exactly**: same sample rate (48 kHz), same A-weighting coefficients, same peak-to-RMS term (+3.0103 dB). If the two ever diverge, the trim derived here is wrong by the difference. Earlier versions of this example got all three wrong at once — 16 kHz against the node's 48 kHz, the superseded A coefficients, and no peak-to-RMS term — which is how a measured 106.5 dB turned into a trim 3 dB off.
@@ -125,6 +167,24 @@ Labels follow the silkscreen of the MRS179A breakout (photo). Other modules use 
 It applies no trim of its own, by design: its job is to show the untrimmed level so the trim can be derived from it.
 
 **The two RMS figures.** `dBFS(A)` is what the firmware's log line reports; `dBFS(Z)` is unweighted and includes low-frequency rumble that A-weighting removes, so it reads higher in a real room. Use `dBFS(A)` when comparing against the firmware.
+
+## Use the 94 dB setting: above ~106 dB this node saturates
+
+Measured on a real unit of this project, at three calibrator settings:
+
+| Setting | `dBFS(A)` | peak | of full scale |
+| :--- | ---: | ---: | ---: |
+| 94 dB | −15.21 | −12.20 | 0.25 |
+| 104 dB | −5.37 | −2.36 | **0.76** |
+| 114 dB | −9.01 | −6.00 | 0.50 |
+
+From 94 to 104 the chain is **linear**: the input went up 10.00 dB and the measurement 9.84. The coupling and the firmware are fine.
+
+The 114 dB setting is the one that does not work, and the reason is headroom. This unit has a sensitivity of **−12.20 dBFS peak at 94 dB SPL** against the datasheet's −26 dBFS — it delivers 13.8 dB more level, and that is paid for with 13.8 dB less usable range, so **digital full scale is reached at ~106 dB SPL** instead of the ICS-43434's nominal 120 dB AOP. At 114 dB the microphone is some 8 dB past full scale and its output does not clip cleanly but degrades: that is why it reads **less** than at 104 (−9.01 against −5.37), and why on that plateau `dBFS(A)` and `dBFS(Z)` diverge by 2.1 dB where on the other two they agree — the waveform is already dirty.
+
+The prediction confirms it: from the 94 dB measurement alone, 104 dB implies a peak at 0.78 of full scale and 0.76 was measured. 114 dB would imply 2.45 times full scale, which is impossible.
+
+**In practice:** calibrate with the **94 dB** setting and nothing else. And keep the ceiling in mind when deploying — a node that saturates at ~106 dB cannot measure louder events, and an impulse's `LCpeak` can exceed that. The firmware's `clip` counter (threshold 0.99 of full scale) invalidates the second when it happens, so overload is flagged rather than published as a good reading.
 
 ## Expected result
 

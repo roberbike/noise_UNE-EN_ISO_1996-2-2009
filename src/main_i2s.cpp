@@ -40,6 +40,17 @@
  * platformio.ini for the derivation and the three wrong values that preceded
  * it. For a per-unit adjustment on top, prefer CMD_SET_CALIB, which persists
  * in NVS and needs no reflash.
+ *
+ * MEASUREMENT CEILING. These units read ~13.8 dB hotter than the datasheet
+ * (-12.2 dBFS peak at 94 dB SPL against a specified -26), and that extra
+ * sensitivity costs the same amount of headroom: digital full scale arrives at
+ * ~106 dB SPL, not at the part's nominal 120 dB AOP. Verified with a
+ * calibrator at 94 and 104 dB, where the chain is linear within 0.16 dB, and
+ * at 114 dB, where it sits ~8 dB past full scale and the output degrades
+ * instead of clipping cleanly. For urban ambient levels this is ample, but a
+ * loud impulse's LCpeak can exceed it; MIC_MAX_CLIPS_PER_SEC then invalidates
+ * the second, so an overload is flagged rather than published as a good
+ * reading. Worth knowing before siting a node somewhere genuinely loud.
  */
 
 #ifndef MIC_OFFSET_DB
