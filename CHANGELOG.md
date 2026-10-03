@@ -187,6 +187,10 @@ arreglo se verificó de la misma forma.
   y pasos corregidos.
 - `tools/gen_a_weight.py` reproduce el ajuste de 48 kHz; `tools/README.md`
   actualizado.
+- `docs/architecture/runtime-architecture.json` regenerado: describía la
+  3.3.0 (cola `dataQueue`, 16 kHz, `I2C_Comm_Sync` y números de línea de
+  entonces). Ahora sigue el camino de la 3.3.3, con `SampleChain` y
+  `I2C_Comm_Publish`, y referencias de línea válidas.
 - Las entradas 3.3.1 y 3.3.2 de este CHANGELOG describen ahora lo que se
   publicó en cada una.
 
