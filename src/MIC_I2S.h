@@ -28,8 +28,10 @@
  * LEFT channel. Samples are normalized to full scale [-1.0, +1.0].
  *
  * Datasheet reference (TDK InvenSense ICS-43434):
- *   Sensitivity: -26 dBFS @ 94 dB SPL, 1 kHz
- *   SNR: 64 dBA / Noise floor: ~30 dBA
+ *   Sensitivity: -26 dBFS @ 94 dB SPL, 1 kHz, on the sine PEAK
+ *   AOP: 120 dB SPL / self-noise: ~30 dBA
+ * The units in this project measure ~13.8 dB hotter than that sensitivity,
+ * which moves their digital full scale down to ~106 dB SPL; see main_i2s.cpp.
  */
 
 // --- Pin mapping (Seeed XIAO ESP32-S3) ---
@@ -59,7 +61,8 @@
 #define MIC_REF_DB           94.0f    // SPL reference of the sensitivity spec
 
 // #3 clipping detection: |sample| above this fraction of full scale counts as
-// a clip. The ICS-43434 saturates near ±1.0 FS at ~120 dB SPL / on strong EMI.
+// a clipped sample. On the units measured that happens from ~106 dB SPL (and
+// on strong EMI), not at the datasheet's 120 dB AOP.
 #define MIC_CLIP_THRESHOLD   0.99f
 
 /**
@@ -69,23 +72,11 @@
 bool MIC_I2S_Init();
 
 /**
- * Blocking read of up to max_samples mono samples.
- * Samples are converted to float normalized to full scale [-1, +1].
+ * Blocking read of up to max_samples mono samples, converted to float
+ * normalized to full scale [-1, +1]. Peak and clip detection happen per
+ * sample in SampleChain, so they land in the second each sample belongs to.
  * @return number of samples written into out.
  */
 size_t MIC_I2S_Read(float *out, size_t max_samples);
-
-/**
- * Peak absolute amplitude (full-scale units) seen in the last read.
- * A physically connected ICS-43434 always shows its own noise floor
- * (~1e-5 FS); a stuck-at-zero data line reads as silence below that.
- */
-float MIC_I2S_LastPeak();
-
-/**
- * Number of samples that hit full scale (|s| > MIC_CLIP_THRESHOLD) in the
- * last read. Accumulated by the caller across a 1 s window to gate validity.
- */
-uint32_t MIC_I2S_LastClipCount();
 
 #endif // MIC_I2S_H

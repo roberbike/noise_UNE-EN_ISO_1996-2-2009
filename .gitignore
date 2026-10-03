@@ -11,3 +11,4 @@ dist/
 build/
 output/
 QA_REPORT.md
+__pycache__/

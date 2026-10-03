@@ -22,9 +22,9 @@
 
 // --- Configuration ---
 // SAMPLE_RATE is overridable via build_flags (-D SAMPLE_RATE=48000).
-// Supported: 16000 (default, ADC node) and 48000 (I2S node, wider band /
-// Class-1 headroom). Each rate has its own A-weighting coefficient set,
-// selected at compile time in DSP_Engine.cpp.
+// Supported: 16000 (default, ADC node) and 48000 (I2S node). Each rate has its
+// own A- and C-weighting coefficient sets, selected at compile time in
+// DSP_Engine.cpp.
 #ifndef SAMPLE_RATE
 #define SAMPLE_RATE 16000
 #endif
@@ -38,9 +38,18 @@
 static_assert(SAMPLE_RATE == 16000 || SAMPLE_RATE == 48000,
               "A-weighting coefficients are only provided for 16 kHz and 48 kHz");
 
-#define CALIBRATION_DB 94.0f      // Target dB (Calibrator)
-#define CALIBRATION_RMS_MV 166.0f // Measured RMS mV at 94dB
-#define REF_VOLTAGE 1100          // ADC Ref (mV)
+// ADC node (MAX4466) calibration: the RMS voltage the microphone produces at
+// CALIBRATION_DB. Measure it with examples/calibration and a 94 dB / 1 kHz
+// calibrator, then set it in platformio.ini (-D CALIBRATION_RMS_MV=...) rather
+// than editing this file. It depends on the gain trimmer of each module.
+// A per-unit fine trim on top can be sent over I2C with CMD_SET_CALIB.
+#ifndef CALIBRATION_DB
+#define CALIBRATION_DB 94.0f
+#endif
+#ifndef CALIBRATION_RMS_MV
+#define CALIBRATION_RMS_MV 166.0f
+#endif
+#define REF_VOLTAGE 1100          // default ADC reference for esp_adc_cal (mV)
 
 // --- DSP Structures ---
 struct Biquad {
@@ -52,7 +61,7 @@ struct Biquad {
 struct PeriodStats {
     float energySum;
     uint32_t count;
-    
+
     void add(float db) {
         // Every valid second counts. Discarding quiet seconds (the old
         // db > 10 gate) removed real low levels from the energy average and
@@ -61,14 +70,14 @@ struct PeriodStats {
         energySum += powf(10.0f, db / 10.0f);
         count++;
     }
-    
+
     float getAvg() {
         if (count == 0 || energySum <= 0.0f) return 0.0f;
         return 10.0f * log10f(energySum / (float)count);
     }
-    
+
     bool hasData() const { return count > 0; }
-    
+
     void reset() {
         energySum = 0.0f;
         count = 0;
@@ -116,8 +125,9 @@ struct SensorData {
     // master polling every 5 s sees one second in five and misses roughly 80 %
     // of impulsive events — precisely what LASmax and LCpeak exist to catch.
     // These two hold the maximum since the master's previous CMD_GET_DATA, and
-    // are reset by that read, so no event is lost whatever the polling period.
-    // After a reset they carry the latest second's values, never 0.
+    // are reset by that read, so no event is lost whatever the polling period
+    // and none is reported twice. Read again before a new second has landed,
+    // they repeat the last second's values rather than reporting 0.
     float noiseLASmaxHoldDb;  // Max LASmax since the previous read, dB(A)
     float noiseLCpeakHoldDb;  // Max LCpeak since the previous read, dB(C)
     // #A5 CRC-16/CCITT-FALSE over every byte before this field. The layout
@@ -139,6 +149,8 @@ static_assert(offsetof(SensorData, cycles) == 48, "wire format: cycles moved");
 static_assert(offsetof(SensorData, noiseLden) == 64, "wire format: noiseLden moved");
 static_assert(offsetof(SensorData, noiseLASmaxDb) == 68, "wire format: noiseLASmaxDb moved");
 static_assert(offsetof(SensorData, noiseLCpeakDb) == 72, "wire format: noiseLCpeakDb moved");
+static_assert(offsetof(SensorData, noiseLASmaxHoldDb) == 76, "wire format: noiseLASmaxHoldDb moved");
+static_assert(offsetof(SensorData, noiseLCpeakHoldDb) == 80, "wire format: noiseLCpeakHoldDb moved");
 static_assert(offsetof(SensorData, crc16) == 84, "wire format: crc16 moved");
 static_assert(sizeof(SensorData) == 88, "wire format: unexpected SensorData size");
 
@@ -161,6 +173,7 @@ static inline uint16_t sensordata_crc16(const void *data, size_t len) {
 }
 
 // --- Function Prototypes ---
+// Clears the state of both weighting cascades.
 void DSP_Init();
 float DSP_ApplyFilter(float in, Biquad &f);
 

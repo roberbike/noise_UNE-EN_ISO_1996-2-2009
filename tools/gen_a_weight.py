@@ -225,7 +225,99 @@ def fit_c_high_section_16k():
     print("    {%.8ff, %.8ff, %.8ff, %.8ff, %.8ff, 0, 0}" % tuple(p))
 
 
+def fit_high_sections_48k():
+    """Refit the high-frequency section of the A and C cascades at 48 kHz.
+
+    At 48 kHz the 12194 Hz double pole is below Nyquist, but the plain
+    bilinear transform (no prewarping) still warps it: the cascades were
+    within +-0.54 dB only up to 8 kHz and fell to -6.4 dB at 16 kHz and
+    -15.8 dB at 20 kHz. The low sections are exact and kept; the high one is
+    fitted over 20 Hz-20 kHz, pinned to 0 dB at 1 kHz, and its zeros are
+    reflected inside the unit circle (minimum phase, like the analog curves:
+    it matters for LCpeak, which is a peak). Reproduces DSP_Engine.cpp.
+    """
+    import numpy as np
+    from scipy.optimize import least_squares
+
+    fs = 48000.0
+    fa1, fa2, fa3, fa4 = 20.598997, 107.65265, 737.86223, 12194.217
+
+    def a_iec(f):
+        f = np.asarray(f, float)
+        ra = (fa4**2 * f**4) / ((f**2 + fa1**2) * np.sqrt((f**2 + fa2**2) * (f**2 + fa3**2))
+                                * (f**2 + fa4**2))
+        return 20*np.log10(ra) + 1.9997
+
+    def c_iec(f):
+        f = np.asarray(f, float)
+        H = (fa4**2)*f**2 / ((f**2+fa1**2)*(f**2+fa4**2))
+        n1 = (fa4**2)*1e6 / ((1e6+fa1**2)*(1e6+fa4**2))
+        return 20*np.log10(H/n1)
+
+    def sec(p, f):
+        b0, b1, b2, a1, a2 = p
+        z = np.exp(2j*np.pi*np.asarray(f, float)/fs)
+        return (b0 + b1/z + b2/z**2)/(1 + a1/z + a2/z**2)
+
+    def casc_db(p, f, low):
+        h = sec(p, f)
+        for q in low:
+            h = h * sec(q, f)
+        return 20*np.log10(np.abs(h))
+
+    A_LOW = [(1.0, -2.0, 1.0, -1.89387049, 0.89515977),
+             (1.0, -2.0, 1.0, -1.99461446, 0.99462171)]
+    C_LOW = [(1.0, -2.0, 1.0, -1.99461446, 0.99462171)]
+    BILINEAR_A = (0.23418304, 0.46836609, 0.23418304, -0.22455846, 0.01260663)
+    BILINEAR_C = (0.19789071, 0.39578141, 0.19789071, -0.22455846, 0.01260663)
+
+    fit_f = np.logspace(np.log10(20), np.log10(20000), 800)
+    for name, low, ideal, seed in (("A", A_LOW, a_iec, BILINEAR_A),
+                                   ("C", C_LOW, c_iec, BILINEAR_C)):
+        target = ideal(fit_f)
+
+        def resid(p):
+            d = casc_db(p, fit_f, low) - target
+            pin = casc_db(p, [1000.0], low)[0] * 30.0       # hard 0 dB at 1 kHz
+            m = float(np.max(np.abs(np.roots([1.0, p[3], p[4]]))))
+            pen = (m - 0.95) * 1e4 if m > 0.95 else 0.0     # keep poles inside
+            return np.concatenate([d, [pin], [pen]])
+
+        best = None
+        rng = np.random.default_rng(3)
+        for i in range(80):
+            p0 = np.array(seed) * (1 + (0.6*rng.standard_normal(5) if i else 0))
+            try:
+                r = least_squares(resid, p0, method='lm', max_nfev=20000,
+                                  xtol=1e-15, ftol=1e-15)
+            except Exception:
+                continue
+            e = float(np.max(np.abs(casc_db(r.x, fit_f, low) - target)))
+            if best is None or e < best[0]:
+                best = (e, r.x)
+        p = np.array(best[1])
+
+        # Minimum phase: reflect any zero outside the unit circle, keep the
+        # sign positive and renormalize to 0 dB at 1 kHz.
+        zeros = np.roots(p[:3])
+        zeros = np.where(np.abs(zeros) > 1, 1/np.conj(zeros), zeros)
+        b = np.real(np.poly(zeros))
+        p = np.array([b[0], b[1], b[2], p[3], p[4]])
+        p[:3] *= 10**(-casc_db(p, [1000.0], low)[0]/20)
+
+        e = float(np.max(np.abs(casc_db(p, fit_f, low) - target)))
+        print("%s-weighting, high section refit @ 48 kHz" % name)
+        print("  max |error| 20 Hz-20 kHz = %.3f dB" % e)
+        print("  pole radii = %s, zero radii = %s" % (
+            np.round(np.abs(np.roots([1.0, p[3], p[4]])), 4),
+            np.round(np.abs(np.roots(p[:3])), 4)))
+        print("  high section for DSP_Engine.cpp:")
+        print("    {%.8ff, %.8ff, %.8ff, %.8ff, %.8ff, 0, 0}" % tuple(p))
+
+
 if __name__ == "__main__":
     fit_third_section_16k()
     print()
     fit_c_high_section_16k()
+    print()
+    fit_high_sections_48k()

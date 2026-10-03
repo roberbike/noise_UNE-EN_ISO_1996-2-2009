@@ -15,24 +15,54 @@
 
 #include "DSP_Engine.h"
 
-// --- A-Weighting Filter: cascade of 3 biquads (6th order, IEC 61672-1) ---
-// Coefficients are computed by bilinear transform of the analog A-weighting
-// prototype and normalized to 0 dB @ 1 kHz. One set per supported sample rate
-// (see tools/gen_a_weight.py to regenerate/verify). Struct layout is
-// {b0,b1,b2,a1,a2} with the DF2T convention of DSP_ApplyFilter (a1,a2 are
-// subtracted).
+// --- A-weighting: cascade of 3 biquads (6th order, IEC 61672-1) ---
+// --- C-weighting: cascade of 2 biquads (4th order), for LCpeak    ---
+// One set per supported sample rate. The low sections are the bilinear
+// transform of the analog prototype; the high section of every cascade is
+// fitted by least squares, because the plain transform gets the 12194 Hz
+// double pole wrong at both rates (details below). Every cascade is 0 dB at
+// 1 kHz, so none of this touches the calibration. tools/gen_a_weight.py
+// regenerates and verifies all of them. Struct layout is {b0,b1,b2,a1,a2}
+// with the DF2T convention of DSP_ApplyFilter (a1,a2 are subtracted).
 #if SAMPLE_RATE == 48000
-// 48 kHz. Verified vs IEC 61672-1 nominal values: |err| < 0.6 dB up to 8 kHz.
+// 48 kHz. The two low sections (poles at 20.6, 107.7 and 737.9 Hz) are the
+// exact bilinear transform. The high section is fitted by least squares over
+// 20 Hz-20 kHz: the plain bilinear transform of the 12194 Hz double pole,
+// with no prewarping, was right to 8 kHz (+-0.54 dB) but fell short above it,
+// -1.2 dB at 10 kHz, -2.7 at 12.5 kHz, -6.4 at 16 kHz and -15.8 at 20 kHz.
+// Fitted, the cascade is within +-0.08 dB from 20 Hz to 20 kHz, 0 dB at
+// 1 kHz (so the calibration is unchanged), with poles at |z| = 0.34 and its
+// zeros inside the unit circle. -D A_WEIGHT_LEGACY_48K restores the previous
+// coefficients.
+#ifdef A_WEIGHT_LEGACY_48K
 Biquad aWeightingFilters[3] = {
     {0.23418304f, 0.46836609f, 0.23418304f, -0.22455846f, 0.01260663f, 0, 0},
     {1.00000000f, -2.00000000f, 1.00000000f, -1.89387049f, 0.89515977f, 0, 0},
     {1.00000000f, -2.00000000f, 1.00000000f, -1.99461446f, 0.99462171f, 0, 0}
 };
-// C-weighting @ 48 kHz. Verified vs IEC 61672-1: |err| < 0.6 dB up to 8 kHz.
+#else
+Biquad aWeightingFilters[3] = {
+    {0.59481685f, 0.02328688f, -0.07069832f, -0.65174475f, 0.11228949f, 0, 0},
+    {1.00000000f, -2.00000000f, 1.00000000f, -1.89387049f, 0.89515977f, 0, 0},
+    {1.00000000f, -2.00000000f, 1.00000000f, -1.99461446f, 0.99462171f, 0, 0}
+};
+#endif
+// C-weighting @ 48 kHz: same fit of the high section, same result (+-0.08 dB
+// from 20 Hz to 20 kHz; the bilinear set was -6.4 dB at 16 kHz). Its zeros are
+// kept inside the unit circle, i.e. minimum phase like the analog C curve:
+// LCpeak is a peak, so the shape of the impulse response matters here, not
+// only its magnitude. -D C_WEIGHT_LEGACY_48K restores the previous set.
+#ifdef C_WEIGHT_LEGACY_48K
 Biquad cWeightingFilters[2] = {
     {0.19789071f, 0.39578141f, 0.19789071f, -0.22455846f, 0.01260663f, 0, 0},
     {1.00000000f, -2.00000000f, 1.00000000f, -1.99461446f, 0.99462171f, 0, 0}
 };
+#else
+Biquad cWeightingFilters[2] = {
+    {0.50275407f, 0.00296705f, -0.06611526f, -0.68513665f, 0.12285312f, 0, 0},
+    {1.00000000f, -2.00000000f, 1.00000000f, -1.99461446f, 0.99462171f, 0, 0}
+};
+#endif
 #else
 // 16 kHz. The 12194 Hz pole of the analog A prototype sits above Nyquist, so a
 // plain bilinear transform collapses it and the response falls off far too
@@ -85,7 +115,7 @@ Biquad aWeightingFilters[3] = {
 // 8 kHz and because LCpeak is a peak: one aliased impulse moves it, where an
 // energy average would dilute it. The fix is hardware, not coefficients — an
 // RC low-pass at ~8 kHz on the MAX4466 output (see docs/ESTUDIO_TECNICO.md
-// section 7). Masking a measurement error with a second measurement error was
+// section 6). Masking a measurement error with a second measurement error was
 // not a defensible alternative.
 // Regenerate with tools/gen_a_weight.py (fit_c_high_section_16k).
 #ifdef C_WEIGHT_LEGACY_16K

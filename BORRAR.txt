@@ -1,0 +1,9 @@
+Archivos que hay que BORRAR del repositorio (ya no existen en 3.3.3):
+
+  src/NodeLog.h
+  src/NodeLog.cpp
+  docs/SMART_CITY_CLASE_2.md   (su contenido vigente está ahora en docs/ESTUDIO_TECNICO.md §7)
+
+Archivo NUEVO que hay que añadir a git (git add):
+
+  src/SampleChain.h

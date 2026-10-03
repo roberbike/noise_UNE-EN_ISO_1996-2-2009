@@ -21,15 +21,14 @@
 
 // DMA buffer of 32-bit frames shared by MIC_I2S_Read()
 static int32_t i2s_raw[MIC_I2S_READ_LEN];
-static float last_peak = 0.0f;
-static uint32_t last_clip_count = 0;
 
 bool MIC_I2S_Init() {
-    // Field-by-field assignment (instead of designated initializers) to stay
-    // compatible across IDF 4.4.x minor revisions of i2s_config_t.
+    // Field-by-field assignment (instead of designated initializers): the
+    // layout of i2s_config_t differs between IDF 4.4 (Arduino core 2.0.x)
+    // and IDF 5 (core 3.x), and this compiles on both.
     i2s_config_t cfg = {};
     cfg.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX);
-    cfg.sample_rate = SAMPLE_RATE;                    // 16 kHz: same DSP chain as C3 node
+    cfg.sample_rate = SAMPLE_RATE;                    // 48 kHz on the S3 build
     cfg.bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT;  // 24-bit data in 32-bit frame
     cfg.channel_format = I2S_CHANNEL_FMT_ONLY_LEFT;   // ICS-43434 L/R pin -> GND
     cfg.communication_format = I2S_COMM_FORMAT_STAND_I2S;
@@ -77,30 +76,11 @@ size_t MIC_I2S_Read(float *out, size_t max_samples) {
     }
 
     size_t n = bytes_read / sizeof(int32_t);
-    float peak = 0.0f;
-    uint32_t clips = 0;
-
     for (size_t i = 0; i < n; i++) {
         // 24-bit signed sample MSB-aligned in the 32-bit slot.
         // Arithmetic shift preserves the sign; normalize by 2^23.
         int32_t s24 = i2s_raw[i] >> 8;
-        float s = (float)s24 / 8388608.0f;
-        out[i] = s;
-
-        float a = fabsf(s);
-        if (a > peak) peak = a;
-        if (a > MIC_CLIP_THRESHOLD) clips++;  // #3 clipping detection
+        out[i] = (float)s24 / 8388608.0f;
     }
-
-    last_peak = peak;
-    last_clip_count = clips;
     return n;
-}
-
-float MIC_I2S_LastPeak() {
-    return last_peak;
-}
-
-uint32_t MIC_I2S_LastClipCount() {
-    return last_clip_count;
 }

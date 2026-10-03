@@ -29,7 +29,8 @@ void NoiseAggregator::begin(AmplitudeToDb to_db, float amp_scale, float min_amp,
     int_scale_ = int_scale;
     win_head_ = 0;
     win_count_ = 0;
-    last_mday_ = -1;
+    win_valid_ = 0;
+    last_eval_day_ = -1;
     memset(&last_, 0, sizeof(last_));
     day_.reset();
     evening_.reset();
@@ -75,9 +76,8 @@ bool NoiseAggregator::process(const SecondInput &in, SensorData &out, uint8_t &m
         last_.noiseMinDb = laeq;
         last_.noiseLASmaxDb = lasmax;
         last_.noiseLCpeakDb = lcpeak;
-        // #A7 Feed the hold latches so a slow-polling master still sees the
-        // peak of every second between its reads, not just the last one.
-        I2C_Comm_AccumulateImpulsive(lasmax, lcpeak);
+        // The #A7 hold latches are fed from these two when the node firmware
+        // publishes the second (I2C_Comm_Publish), atomically with the frame.
 
         // Linear-amplitude fields, scaled to per-node integer-friendly units:
         // mV for ADC (int_scale=1), µFS for I2S (int_scale=1e6). Without the
@@ -131,19 +131,28 @@ bool NoiseAggregator::process(const SecondInput &in, SensorData &out, uint8_t &m
         if (I2C_Comm_TimeSynced()) {
             struct tm timeinfo;
             if (getLocalTime(&timeinfo, 0)) {
-                // #B8 Roll the day over BEFORE accumulating. Doing it after
-                // meant the first second of a new day landed in yesterday's
-                // accumulators and was then thrown away by the reset. The
-                // published Ld/Le/Ln are cleared too: they are indices OF the
-                // current day, and carrying yesterday's value into today reads
-                // as if the period had already been measured. A period with no
-                // data yet reports 0 and stays out of Lden (see below).
-                if (last_mday_ != -1 && last_mday_ != timeinfo.tm_mday) {
+                // The evaluation day runs 07:00 -> 07:00. The night period is
+                // 23:00-07:00, a single 8 h interval across midnight; rolling
+                // the day over at midnight (as this did until 3.3.2) split it,
+                // so Ln mixed the small hours of one night with the first hour
+                // of the next. Keying the day on local time shifted back 7 h
+                // makes the rollover happen as the day period starts.
+                //
+                // #B8 The rollover runs BEFORE accumulating, and clears the
+                // published indices: they belong to the current evaluation
+                // day, and a period with no data yet reports 0 and stays out
+                // of Lden (see below). Read them just before 07:00 to get the
+                // complete day.
+                time_t shifted = mktime(&timeinfo) - 7 * 3600;
+                struct tm eval;
+                localtime_r(&shifted, &eval);
+                int eval_day = eval.tm_year * 1000 + eval.tm_yday;
+                if (last_eval_day_ != -1 && last_eval_day_ != eval_day) {
                     day_.reset(); evening_.reset(); night_.reset();
                     last_.Ld = 0.0f; last_.Le = 0.0f; last_.Ln = 0.0f;
                     last_.noiseLden = 0.0f;
                 }
-                last_mday_ = timeinfo.tm_mday;
+                last_eval_day_ = eval_day;
 
                 int h = timeinfo.tm_hour;
                 if (h >= 7 && h < 19)       day_.add(laeq);
@@ -185,7 +194,6 @@ bool NoiseAggregator::process(const SecondInput &in, SensorData &out, uint8_t &m
                 uint32_t secs = day_.count + evening_.count + night_.count;
                 uint32_t mins = secs / 60u;
                 I2C_Comm_SetLdenProgress(mask, (uint16_t)(mins > 65535u ? 65535u : mins));
-
             }
         }
     }

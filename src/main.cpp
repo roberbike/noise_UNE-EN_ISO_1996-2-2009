@@ -21,37 +21,47 @@
 #include <esp_idf_version.h>
 #include "driver/adc.h"
 #include "esp_adc_cal.h"
-#include "sys/time.h"
-#include "time.h"
 
 #include "DSP_Engine.h"
 #include "I2C_Comm.h"
-#include "NodeLog.h"
 #include "NoiseAggregator.h"
+#include "SampleChain.h"
 
 /**
- * --- ESP32-C3 PROFESSIONAL NOISE MONITOR ---
- * RTOS Polling Architecture. ADC (MAX4466) front-end; the per-second acoustic
- * math lives in the shared NoiseAggregator (see main_i2s.cpp for the I2S node).
- * Compliant with (orientative) requirements of Decree 213/2012 & UNE-ISO 1996-2.
+ * --- ESP32-C3 + MAX4466 NOISE MONITOR (ADC) ---
+ * The ADC is polled at SAMPLE_RATE (16 kHz) by a busy loop. SampleChain does
+ * the per-sample work and NoiseAggregator the per-second ISO 1996-2 work,
+ * exactly as on the I2S node (main_i2s.cpp); only acquisition differs.
+ * Orientative indicators per Decree 213/2012 and UNE-EN ISO 1996-2, not a
+ * certified sound level meter.
  */
 
 #define ADC_CHANNEL ADC1_CHANNEL_4 // GPIO 4
 
+// One hardware setting, two names: IDF up to 4.4.6 (Arduino core up to
+// 2.0.14) only has ADC_ATTEN_DB_11; IDF 4.4.7 (core 2.0.15) renamed it
+// ADC_ATTEN_DB_12 and deprecated the old name, and IDF 5 (core 3.x) keeps
+// the new one.
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(4, 4, 7)
+#define ADC_ATTEN ADC_ATTEN_DB_12
+#else
+#define ADC_ATTEN ADC_ATTEN_DB_11
+#endif
+
 #define NODE_TYPE_ADC 0x01         // reported via I2C metadata
 
-// #B4 overload thresholds for the 12-bit ADC, and how many clipped samples in
-// one second invalidate the reading (same policy as the I2S node).
+// #B4 overload: samples at either end of the 12-bit range count as clipped,
+// and more than ADC_MAX_CLIPS_PER_SEC of them invalidate the second (the same
+// policy as the I2S node).
 #define ADC_CLIP_HIGH 4090
 #define ADC_CLIP_LOW  5
 #define ADC_MAX_CLIPS_PER_SEC 10
 
-// Task/sampling watchdog: if a task stops feeding it, the chip resets instead
+// Task watchdog: if the sampling task stops feeding it, the chip resets instead
 // of running mute. 5 s covers the 2 s aggregator timeout with margin.
 #define WDT_TIMEOUT_S 5
 
 esp_adc_cal_characteristics_t adc_chars;
-float dc_offset = 2048.0;
 
 // mV per ADC count (calibrated slope, no intercept). An AC amplitude such as
 // an RMS must NOT go through esp_adc_cal_raw_to_voltage(): that function maps
@@ -61,60 +71,44 @@ float adc_mv_per_count = 1.0f;
 
 NoiseAggregator aggregator;
 TaskHandle_t aggregator_task_handle = NULL;
+QueueHandle_t secondQueue;
 
-struct RawSecondData {
-    float max_fast_sq;
-    float max_slow_sq;     // LASmax
-    float peak_c;          // LCpeak (C-weighted absolute peak)
-    double sum_sq_A;
-    uint32_t samples_count;
-    uint32_t clip_count;   // #B4 samples at either ADC rail this second
-};
-QueueHandle_t timerToTaskQueue;
-
-// #R3 Routed through the deferred log queue: the UART write happens in the
-// loop task, which the sampling task can preempt, instead of inside the
-// high-priority aggregator where it stalled sampling for ~9.5 ms every second.
 void SerialLog(const char *level, const char *msg) {
-    NodeLog_Msg(level, msg);
+    Serial.printf("[%s] %s\n", level, msg);
 }
 
+// The MAX4466 output is biased at VCC/2. A bias far from that means the module
+// is unpowered, disconnected or shorted.
 bool check_microphone_connection(uint32_t bias_mv) {
-    return (bias_mv > 800 && bias_mv < 2600); // 3.3V bias check
+    return (bias_mv > 800 && bias_mv < 2600);
 }
 
-// Amplitude(mV) -> dB SPL for the ADC/MAX4466 path (injected into aggregator).
+// Amplitude (mV) -> dB SPL for the MAX4466 (injected into the aggregator).
+// CALIBRATION_RMS_MV is the compile-time calibration; I2C_Comm_GetCalibOffset()
+// adds the per-unit trim stored in NVS (CMD_SET_CALIB), applied without
+// reflashing.
 static float adc_amp_to_db(float rms_mv) {
-    // CALIBRATION_DB is the compile-time reference; I2C_Comm_GetCalibOffset()
-    // adds a field trim stored in NVS (CMD_SET_CALIB), so a calibrator can
-    // correct the node without reflashing.
     return 20.0f * log10f(rms_mv / CALIBRATION_RMS_MV) + CALIBRATION_DB
            + I2C_Comm_GetCalibOffset();
 }
 
 /**
- * High Priority Sampling Task (Polling)
- * On single-core C3, polling at 16 kHz is more efficient than esp_timer:
- * it eliminates 16,000 context switches per second.
+ * Sampling task: polls the ADC at SAMPLE_RATE. On the single-core C3 a busy
+ * loop is cheaper than a 16 kHz timer interrupt. It never blocks, so tasks
+ * below its priority (Arduino's loopTask, IDLE) do not run once it starts —
+ * which is why nothing here may depend on loop(), and why the watchdog below
+ * must not watch the IDLE task.
  */
 void sampling_task(void *pvParameters) {
-    esp_task_wdt_add(NULL); // #13 watchdog: this task must keep sampling
+    esp_task_wdt_add(NULL); // fed once per completed second
 
-    int samples_count = 0;
-    double sum_sq_A = 0.0;
-    float fast_ema_sq = 0.0f;
-    float max_fast_sq = 0.0f;
-    float slow_ema_sq = 0.0f;
-    float max_slow_sq = 0.0f;
-    float peak_c = 0.0f;
-    uint32_t clip_acc = 0;      // #B4 samples pinned at either ADC rail
+    SampleChain chain;
+    SecondAccum second;
+    // Half a second of warm-up: the DC tracker is primed from the first sample
+    // and the filters settle before anything is accumulated (SampleChain.h).
+    chain.begin(2048.0f, SAMPLE_RATE / 2);
+
     uint32_t period_frac = 0;   // #B1 fractional part of the sample period
-
-    // Fast time weighting = 125 ms. alpha = 1/(0.125 s * fs).
-    const float alpha_fast = 1.0f / (0.125f * SAMPLE_RATE);
-    // Slow time weighting = 1 s (LASmax).
-    const float alpha_slow = 1.0f / (1.0f * SAMPLE_RATE);
-
     uint32_t next_sample_time = micros();
 
     while (1) {
@@ -127,60 +121,15 @@ void sampling_task(void *pvParameters) {
                 next_sample_time = now; // resync instead of burst-sampling
             }
 
-            uint32_t raw = adc1_get_raw(ADC_CHANNEL);
+            int raw = adc1_get_raw(ADC_CHANNEL);
+            // #B4 The bias check only looks at the DC average, so it cannot
+            // see clipping: a signal pinned at either rail keeps the mean
+            // centred. Count samples sitting at the ends of the range.
+            bool clipped = (raw >= ADC_CLIP_HIGH || raw <= ADC_CLIP_LOW);
 
-            // #B4 overload detection. The bias check only looks at the DC
-            // average, so it cannot see clipping: a signal pinned at either
-            // rail keeps the mean centred. IEC 61672 requires an overload
-            // indication, so count samples sitting at the ends of the range.
-            if (raw >= ADC_CLIP_HIGH || raw <= ADC_CLIP_LOW) clip_acc++;
-
-            dc_offset = (dc_offset * 0.9999f) + ((float)raw * 0.0001f);
-            float signal = (float)raw - dc_offset;
-
-            float filtered = signal;
-            for (int i = 0; i < 3; i++) {
-                filtered = DSP_ApplyFilter(filtered, aWeightingFilters[i]);
-            }
-
-            float sq = filtered * filtered;
-            sum_sq_A += (double)sq;
-
-            fast_ema_sq = (sq * alpha_fast) + (fast_ema_sq * (1.0f - alpha_fast));
-            if (fast_ema_sq > max_fast_sq) max_fast_sq = fast_ema_sq;
-
-            // LASmax: slow (1 s) envelope of the A-weighted squared signal.
-            slow_ema_sq = (sq * alpha_slow) + (slow_ema_sq * (1.0f - alpha_slow));
-            if (slow_ema_sq > max_slow_sq) max_slow_sq = slow_ema_sq;
-
-            // LCpeak: absolute peak of the C-weighted signal (no time weighting).
-            float c_filt = signal;
-            for (int k = 0; k < 2; k++) {
-                c_filt = DSP_ApplyFilter(c_filt, cWeightingFilters[k]);
-            }
-            float c_abs = fabsf(c_filt);
-            if (c_abs > peak_c) peak_c = c_abs;
-
-            samples_count++;
-
-            if (samples_count >= SAMPLE_RATE) {
-                RawSecondData secData = {
-                    .max_fast_sq = max_fast_sq,
-                    .max_slow_sq = max_slow_sq,
-                    .peak_c = peak_c,
-                    .sum_sq_A = sum_sq_A,
-                    .samples_count = (uint32_t)samples_count,
-                    .clip_count = clip_acc
-                };
-                xQueueOverwrite(timerToTaskQueue, &secData);
-                esp_task_wdt_reset(); // fed once per completed second
-
-                sum_sq_A = 0.0;
-                max_fast_sq = 0.0f;
-                max_slow_sq = 0.0f;
-                peak_c = 0.0f;
-                clip_acc = 0;
-                samples_count = 0;
+            if (chain.push((float)raw, clipped, second)) {
+                xQueueOverwrite(secondQueue, &second);
+                esp_task_wdt_reset();
             }
 
             // #B1 exact average rate: add the integer period and borrow one
@@ -193,68 +142,62 @@ void sampling_task(void *pvParameters) {
                 next_sample_time += 1;
             }
         } else {
-            taskYIELD(); // dead time: let I2C slave callbacks run
+            taskYIELD(); // dead time: let equal/higher-priority tasks run
         }
     }
 }
 
 /**
- * Aggregator Task (once per second, woken by queue).
- * All ISO 1996-2 math is delegated to the shared NoiseAggregator.
+ * Aggregator task: woken once per second by the sampling task.
  */
 void aggregator_task(void *pvParameters) {
-    RawSecondData secData;
-    SensorData out = {0};
+    SecondAccum second;
+    SensorData out = {};
     uint8_t mic_ok = 0;
-    I2cPayloadMessage i2cMsg;
 
     while (1) {
-        if (xQueueReceive(timerToTaskQueue, &secData, pdMS_TO_TICKS(2000)) == pdTRUE) {
-            // Bias/connection check (ADC-specific) folds into input_valid.
-            uint32_t bias_mv = esp_adc_cal_raw_to_voltage((uint32_t)dc_offset, &adc_chars);
+        if (xQueueReceive(secondQueue, &second, pdMS_TO_TICKS(2000)) == pdTRUE) {
+            uint32_t bias_mv = esp_adc_cal_raw_to_voltage((uint32_t)second.dc, &adc_chars);
             bool bias_ok = check_microphone_connection(bias_mv);
-            bool not_clipped = (secData.clip_count <= ADC_MAX_CLIPS_PER_SEC);
-            bool input_ok = bias_ok && not_clipped;
+            bool not_clipped = (second.clips <= ADC_MAX_CLIPS_PER_SEC);
 
             SecondInput in = {
-                .mean_sq = (float)(secData.sum_sq_A / secData.samples_count),
-                .max_fast_sq = secData.max_fast_sq,
-                .max_slow_sq = secData.max_slow_sq,
-                .peak_c = secData.peak_c,
-                .samples = secData.samples_count,
-                .input_valid = input_ok,
-                .clip_count = secData.clip_count
+                .mean_sq = (float)(second.sum_sq_A / second.samples),
+                .max_fast_sq = second.max_fast_sq,
+                .max_slow_sq = second.max_slow_sq,
+                .peak_c = second.peak_c,
+                .samples = second.samples,
+                .input_valid = bias_ok && not_clipped
             };
 
             bool valid = aggregator.process(in, out, mic_ok);
-            I2C_Comm_SetClipCount((uint16_t)secData.clip_count); // #B4 metadata
+            I2C_Comm_SetClipCount(second.clips > 65535u ? (uint16_t)65535u
+                                                        : (uint16_t)second.clips);
+            I2C_Comm_Publish(out, mic_ok);
+            I2C_Comm_Service(); // deferred clock set + NVS write
 
+            // Logged after publishing, so a slow serial port can never delay
+            // the data. The serial drivers wait on a semaphore when their
+            // buffer is full, so this task sleeps rather than spins and the
+            // sampling task keeps running meanwhile.
             if (valid) {
-                NodeLog_Printf("[SMART] LAeq:%.1f | LAFmx:%.1f | LASmx:%.1f | LCpk:%.1f | L10:%.1f | L90:%d | Lden:%.1f | cyc:%u\n",
+                Serial.printf("[SMART] LAeq:%.1f | LAFmx:%.1f | LASmx:%.1f | LCpk:%.1f | L10:%.1f | L90:%d | Lden:%.1f | clip:%u | cyc:%u\n",
                               out.noiseAvgDb, out.noisePeakDb, out.noiseLASmaxDb,
                               out.noiseLCpeakDb, out.noiseAvgLegalDb,
                               out.lowNoiseLevel, out.noiseLden,
-                              (unsigned)out.cycles);
+                              (unsigned)second.clips, (unsigned)out.cycles);
             } else if (!not_clipped) {
                 SerialLog("WARN", "Overload: ADC clipping, reading invalidated");
             } else {
                 SerialLog("WARN", "Microphone range error/disconnected");
             }
-
-            i2cMsg.data = out;
-            i2cMsg.mic_ok = mic_ok;
-            xQueueOverwrite(dataQueue, &i2cMsg);
-            I2C_Comm_Sync();
-            I2C_Comm_Service(); // deferred clock set + NVS write (task context)
         } else {
-            // No second in 2 s: sampling stalled. Surface it (status 0,
-            // cycles frozen) instead of serving a frozen struct. The task
-            // watchdog will reset the chip if this persists.
+            // No second in 2 s: sampling stalled. Report it (status 0, cycles
+            // frozen) instead of serving a frozen struct as valid. The task
+            // watchdog resets the chip if this persists.
+            I2C_Comm_Publish(out, 0);
+            I2C_Comm_Service();
             SerialLog("WARN", "No samples for 2 s: sampling task stalled");
-            i2cMsg.data = out;
-            i2cMsg.mic_ok = 0;
-            xQueueOverwrite(dataQueue, &i2cMsg);
-            I2C_Comm_Sync();
         }
     }
 }
@@ -262,60 +205,49 @@ void aggregator_task(void *pvParameters) {
 void ruido_setup() {
     Serial.begin(115200);
     delay(1000);
-    NodeLog_Init(); // #R3 deferred logging; must precede the tasks
     SerialLog("INIT", "Smart City Noise Sensor - ESP32-C3 + MAX4466 (ADC)");
 
-    dataQueue = xQueueCreate(1, sizeof(I2cPayloadMessage));
-    timerToTaskQueue = xQueueCreate(1, sizeof(RawSecondData));
-
-    if (dataQueue == NULL || timerToTaskQueue == NULL) {
-        SerialLog("ERR", "Failed to create FreeRTOS Queues");
+    secondQueue = xQueueCreate(1, sizeof(SecondAccum));
+    if (secondQueue == NULL) {
+        SerialLog("ERR", "Failed to create the FreeRTOS queue");
         while (1) delay(1000);
     }
 
     DSP_Init();
     I2C_Comm_Init();
-    I2C_Comm_SetNodeType(NODE_TYPE_ADC); // #12 metadata
+    I2C_Comm_SetNodeType(NODE_TYPE_ADC);
 
-#if defined(ESP32S2) || defined(CONFIG_IDF_TARGET_ESP32S2)
-    adc1_config_channel_atten(ADC_CHANNEL, ADC_ATTEN_DB_11);
-    esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN_DB_11, ADC_WIDTH_BIT_13, REF_VOLTAGE, &adc_chars);
-    dc_offset = 4096.0f;
-#else
-    adc1_config_channel_atten(ADC_CHANNEL, ADC_ATTEN_DB_12);
-    esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN_DB_12, ADC_WIDTH_BIT_12, REF_VOLTAGE, &adc_chars);
-    dc_offset = 2048.0f;
-#endif
+    adc1_config_channel_atten(ADC_CHANNEL, ADC_ATTEN);
+    esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN, ADC_WIDTH_BIT_12, REF_VOLTAGE, &adc_chars);
 
     adc_mv_per_count = (float)(esp_adc_cal_raw_to_voltage(3000, &adc_chars) -
                                esp_adc_cal_raw_to_voltage(1000, &adc_chars)) / 2000.0f;
     Serial.printf("[INIT] ADC slope: %.4f mV/count\n", adc_mv_per_count);
 
-    // Shared aggregator: ADC amplitude is mV; scale by the calibrated slope;
+    // Shared aggregator: ADC amplitude in mV via the calibrated slope; a
     // 0.05 mV floor flags dead-input seconds.
     aggregator.begin(adc_amp_to_db, adc_mv_per_count, 0.05f);
 
-    // #13 task watchdog. Arduino-ESP32 already initializes the TWDT for the
-    // loop() task, so calling esp_task_wdt_init() again returns
-    // ESP_ERR_INVALID_STATE (and can disturb the loop task). Reconfigure the
-    // existing TWDT instead; the sampling task subscribes via
-    // esp_task_wdt_add(NULL) and feeds it once per completed second.
+    // #13 Task watchdog. The Arduino core has already initialized it, so a
+    // second esp_task_wdt_init() returns ESP_ERR_INVALID_STATE: reconfigure it
+    // instead. idle_core_mask = 0 is load-bearing here: the sampling task never
+    // blocks, so the IDLE task never runs, and a watchdog that watched it would
+    // reset the chip every WDT_TIMEOUT_S.
 #if ESP_IDF_VERSION_MAJOR >= 5
     esp_task_wdt_config_t wdt_cfg = {
         .timeout_ms = WDT_TIMEOUT_S * 1000,
         .idle_core_mask = 0,
         .trigger_panic = true
     };
-    // reconfigure if already running, otherwise init (bare-IDF builds).
     if (esp_task_wdt_reconfigure(&wdt_cfg) == ESP_ERR_INVALID_STATE) {
         esp_task_wdt_init(&wdt_cfg);
     }
 #else
-    // On 4.x, re-init with a longer timeout is tolerated (idempotent enough).
     esp_task_wdt_init(WDT_TIMEOUT_S, true);
 #endif
 
     xTaskCreate(aggregator_task, "DSP_AGG", 8192, NULL, configMAX_PRIORITIES - 5, &aggregator_task_handle);
+    // Created last: from here on loopTask does not get the CPU again.
     xTaskCreate(sampling_task, "ADC_SAM", 8192, NULL, 5, NULL);
 }
 
@@ -324,14 +256,9 @@ void setup() {
 }
 
 void loop() {
-    // #R2 The Arduino core may have this task subscribed to the TWDT.
-    // Deleting a subscribed task without unsubscribing first is undefined
-    // behaviour, so detach it and then park the task instead of deleting it.
+    // Never reached on the C3 (see sampling_task). Kept correct anyway: the
+    // core may have this task subscribed to the watchdog, and deleting a
+    // subscribed task is undefined, so unsubscribe and park instead.
     esp_task_wdt_delete(NULL);
-    // #R3 Instead of parking, this low-priority task drains the log queue, so
-    // the blocking UART writes happen where the sampling task can preempt
-    // them. NodeLog_Pump() blocks on the queue, so this does not spin.
-    while (1) {
-        NodeLog_Pump();
-    }
+    vTaskDelay(portMAX_DELAY);
 }

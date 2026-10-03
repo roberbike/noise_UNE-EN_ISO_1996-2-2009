@@ -15,22 +15,41 @@
 
 #include "I2C_Comm.h"
 #include <sys/time.h>
-#include <freertos/queue.h>
 #include <Preferences.h>
-#include "NodeLog.h"
 
-QueueHandle_t dataQueue = NULL;
-SensorData cachedSensorData = {0};
-uint8_t cachedMicOk = 0;
+/*
+ * Concurrency. Three contexts touch this module:
+ *  - the aggregator task, once per second (Publish, the metadata setters,
+ *    Service);
+ *  - the Arduino core's I2C slave task, which runs receiveEvent/requestEvent
+ *    while the master waits on the bus;
+ *  - setup, once (Init).
+ * The served struct, its status and the hold latches are read and written
+ * together, so they share one spinlock. The metadata fields are independent
+ * single values and are only ever read whole.
+ */
+static portMUX_TYPE cacheMux = portMUX_INITIALIZER_UNLOCKED;
 
-// NVS-backed calibration offset (dB). Loaded at init, updated by CMD_SET_CALIB.
+static SensorData cachedSensorData = {};
+static uint8_t cachedMicOk = 0;
+// 0 until the first second lands, so the status byte reports "not ready" and
+// a master that follows the protocol never publishes the boot-time zeros.
+static uint8_t data_ready = 0;
+
+// #A7 Impulsive hold latches: the maximum LASmax and LCpeak since the
+// master's previous data read. hold_primed is false right after a read, so
+// the next second starts a fresh window instead of re-counting the last one.
+static float hold_lasmax_db = 0.0f;
+static float hold_lcpeak_db = 0.0f;
+static bool  hold_primed = false;
+
+// NVS-backed calibration offset (dB). Loaded at init, replaced by
+// CMD_SET_CALIB. The callback only sets calib_dirty; Service() writes flash.
 static Preferences prefs;
 static volatile float calib_offset_db = 0.0f;
-// Set by the I2C callback, cleared by I2C_Comm_Service() in task context.
 static volatile uint8_t calib_dirty = 0;
-// #R1 Pending wall clock from CMD_SET_TIME_LEGACY. The callback only stores
-// the epoch and raises the flag: settimeofday() takes newlib locks and must
-// not run in the I2C slave callback context, so it is applied in task context.
+
+// #R1 Pending wall clock from CMD_SET_TIME_LEGACY, applied by Service().
 static volatile uint32_t pending_epoch = 0;
 static volatile uint8_t time_dirty = 0;
 
@@ -42,62 +61,40 @@ static volatile uint16_t meta_window_size = 0;
 static volatile uint8_t meta_lden_periods = 0;
 static volatile uint16_t meta_lden_minutes = 0;
 
-// #A7 Impulsive hold latches. Written by the aggregator every valid second and
-// by requestEvent when a read consumes them, so they are guarded by the same
-// spinlock as the cached struct (declared below, used after its definition).
-static float hold_lasmax_db = 0.0f;
-static float hold_lcpeak_db = 0.0f;
-static bool  hold_primed = false;
+static volatile uint8_t i2c_active_command = CMD_GET_STATUS;
 
-float I2C_Comm_GetCalibOffset() {
-    return calib_offset_db;
+// Every comparison with NaN is false and +-inf is out of range, so this also
+// rejects a corrupted (non-finite) value without a separate isfinite().
+static bool calib_in_range(float v) {
+    return v >= CALIB_OFFSET_MIN_DB && v <= CALIB_OFFSET_MAX_DB;
 }
 
-void I2C_Comm_Service() {
-    // #R1 apply a pending clock set here, never in the I2C callback.
-    if (time_dirty) {
-        time_dirty = 0;
-        uint32_t ts = pending_epoch;
-        struct timeval tv = {(long)ts, 0};
-        settimeofday(&tv, NULL);
-        meta_time_synced = 1; // #5: enable Ld/Le/Ln computation
-        NodeLog_Printf("[TIME] Clock set from master: epoch %lu (local)\n",
-                       (unsigned long)ts);
-    }
+// ---------------------------------------------------------------------------
+// Aggregator-side API
+// ---------------------------------------------------------------------------
 
-    if (!calib_dirty) return;
-    calib_dirty = 0;
-    float v = calib_offset_db;
-    prefs.begin("noise", false);
-    prefs.putFloat("calib_db", v);
-    prefs.end();
-    NodeLog_Printf("[CALIB] Offset saved to NVS: %.2f dB\n", v);
-}
-
-// Guards cachedSensorData/cachedMicOk: I2C_Comm_Sync (task context) copies the
-// struct while requestEvent (slave HAL context) reads it. Without the lock a
-// request landing mid-copy delivers a torn struct to the master.
-// portENTER/EXIT_CRITICAL_SAFE work from both task and ISR context.
-static portMUX_TYPE cacheMux = portMUX_INITIALIZER_UNLOCKED;
-
-// 0 until the first aggregation lands. The status byte reports 0 (not ready)
-// so protocol-following masters never publish the boot-time zeroed struct.
-static volatile uint8_t data_ready = 0;
-
-void I2C_Comm_AccumulateImpulsive(float lasmax_db, float lcpeak_db) {
+void I2C_Comm_Publish(const SensorData &data, uint8_t mic_ok) {
     portENTER_CRITICAL_SAFE(&cacheMux);
-    if (!hold_primed) {
-        hold_lasmax_db = lasmax_db;
-        hold_lcpeak_db = lcpeak_db;
-        hold_primed = true;
-    } else {
-        if (lasmax_db > hold_lasmax_db) hold_lasmax_db = lasmax_db;
-        if (lcpeak_db > hold_lcpeak_db) hold_lcpeak_db = lcpeak_db;
+    cachedSensorData = data;
+    cachedMicOk = mic_ok;
+    data_ready = 1;
+    // #A7 A valid second also feeds the hold latches, inside the same critical
+    // section as the frame it belongs to. Fed separately (as until 3.3.2), a
+    // read landing between the two updates got the previous frame with this
+    // second's impulse in the latch, consumed the window, and the next read
+    // reported the same impulse again as its own last-second value.
+    if (mic_ok) {
+        if (!hold_primed) {
+            hold_lasmax_db = data.noiseLASmaxDb;
+            hold_lcpeak_db = data.noiseLCpeakDb;
+            hold_primed = true;
+        } else {
+            if (data.noiseLASmaxDb > hold_lasmax_db) hold_lasmax_db = data.noiseLASmaxDb;
+            if (data.noiseLCpeakDb > hold_lcpeak_db) hold_lcpeak_db = data.noiseLCpeakDb;
+        }
     }
     portEXIT_CRITICAL_SAFE(&cacheMux);
 }
-
-// #12/#5 node metadata, updated by the node firmware and by the set-time path.
 
 void I2C_Comm_SetNodeType(uint8_t node_type) {
     meta_node_type = node_type;
@@ -106,8 +103,6 @@ void I2C_Comm_SetNodeType(uint8_t node_type) {
 void I2C_Comm_SetClipCount(uint16_t clip_count) {
     meta_clip_count = clip_count;
 }
-
-void I2C_Comm_AccumulateImpulsive(float lasmax_db, float lcpeak_db);
 
 void I2C_Comm_SetLdenProgress(uint8_t periods_mask, uint16_t minutes) {
     meta_lden_periods = periods_mask;
@@ -123,17 +118,40 @@ bool I2C_Comm_TimeSynced() {
     return meta_time_synced != 0;
 }
 
-volatile uint8_t i2c_active_command = CMD_GET_STATUS;
-
-static inline void update_i2c_command(uint8_t cmd) {
-    i2c_active_command = cmd;
+float I2C_Comm_GetCalibOffset() {
+    return calib_offset_db;
 }
 
-static inline uint8_t read_i2c_command() {
-    return i2c_active_command;
+void I2C_Comm_Service() {
+    if (time_dirty) {
+        time_dirty = 0;
+        uint32_t ts = pending_epoch;
+        // time_t, not long: long is 32-bit on both targets, so (long)ts went
+        // negative from 2038-01-19 and the clock landed in 1901, which also
+        // stopped Ld/Le/Ln. With IDF 5 (core 3.x) time_t is 64-bit and the
+        // master's uint32 epoch is good until 2106; on IDF 4.4 (core 2.0.x)
+        // time_t itself is 32-bit, so there the clock ends in 2038 anyway.
+        struct timeval tv = {(time_t)ts, 0};
+        settimeofday(&tv, NULL);
+        meta_time_synced = 1;
+        Serial.printf("[TIME] Clock set from master: epoch %lu (local)\n",
+                      (unsigned long)ts);
+    }
+
+    if (calib_dirty) {
+        calib_dirty = 0;
+        float v = calib_offset_db;
+        prefs.begin("noise", false);
+        prefs.putFloat("calib_db", v);
+        prefs.end();
+        Serial.printf("[CALIB] Offset saved to NVS: %.2f dB\n", v);
+    }
 }
 
-// --- I2C SLAVE EVENT HANDLERS ---
+// ---------------------------------------------------------------------------
+// I2C slave callbacks (Arduino core I2C slave task)
+// ---------------------------------------------------------------------------
+
 void receiveEvent(int bytes) {
     if (Wire.available() <= 0) {
         return;
@@ -143,38 +161,33 @@ void receiveEvent(int bytes) {
     if (cmd == CMD_GET_STATUS_LEGACY) {
         cmd = CMD_GET_STATUS;
     }
-    update_i2c_command(cmd);
+    i2c_active_command = cmd;
 
-    // Compatibility path: set Unix epoch via 0x09 + 4 bytes.
+    // Set the clock: 0x09 + uint32 little-endian epoch (LOCAL time — the node
+    // applies no timezone, so the day/evening/night bands follow exactly what
+    // the master sends). Applied later by Service(), in task context.
     if (cmd == CMD_SET_TIME_LEGACY && bytes == 5) {
         uint32_t timestamp = 0;
         uint8_t *p = (uint8_t *)&timestamp;
         for (int i = 0; i < 4 && Wire.available(); i++) {
             p[i] = Wire.read();
         }
-        // #R1 defer the clock set to task context (see pending_epoch above).
-        // The master sends LOCAL epoch: the node applies no timezone, so the
-        // day/evening/night bands follow exactly what the master sends.
         pending_epoch = timestamp;
         time_dirty = 1;
     }
 
-    // Persistent calibration: 0x0A + int16 LE (hundredths of dB).
-    // The value is applied immediately, but the NVS write is DEFERRED: flash
-    // erase/write blocks for tens of ms and must never run inside the I2C
-    // slave callback (it would stall responses to the master). The aggregator
-    // task calls I2C_Comm_Service() once per second to flush it.
+    // Calibration offset: 0x0A + int16 little-endian, hundredths of dB. It
+    // takes effect at once; the flash write is deferred to Service(), because
+    // an erase blocks for tens of ms and the master is waiting on the bus.
     if (cmd == CMD_SET_CALIB && bytes == 3) {
         int16_t raw = 0;
         uint8_t *p = (uint8_t *)&raw;
         if (Wire.available()) p[0] = Wire.read();
         if (Wire.available()) p[1] = Wire.read();
         float v = raw / 100.0f;
-        // Range check: a corrupted byte must not persist an absurd offset that
-        // would survive reboots and silently ruin every reading.
-        if (v >= CALIB_OFFSET_MIN_DB && v <= CALIB_OFFSET_MAX_DB) {
+        if (calib_in_range(v)) {
             calib_offset_db = v;
-            calib_dirty = 1; // flushed to NVS by the aggregator task
+            calib_dirty = 1;
         }
     }
 
@@ -183,59 +196,32 @@ void receiveEvent(int bytes) {
     }
 }
 
-void I2C_Comm_Sync() {
-    // Drain queue to ensure we have the absolute latest metrics
-    // This is called from a task context, not from the I2C callback
-    I2cPayloadMessage msg;
-    bool updated = false;
-    while (xQueueReceive(dataQueue, &msg, 0) == pdTRUE) {
-        updated = true;
-    }
-    if (updated) {
-        portENTER_CRITICAL_SAFE(&cacheMux);
-        cachedSensorData = msg.data;
-        cachedMicOk = msg.mic_ok;
-        data_ready = 1;
-        portEXIT_CRITICAL_SAFE(&cacheMux);
-    }
-}
-
 void requestEvent() {
-    uint8_t cmd = read_i2c_command();
+    uint8_t cmd = i2c_active_command;
 
-    // Atomic snapshot: never serve the struct while Sync is copying into it.
     SensorData snap;
     uint8_t status;
     portENTER_CRITICAL_SAFE(&cacheMux);
     snap = cachedSensorData;
     status = (data_ready && cachedMicOk) ? 1 : 0;
-    // #A7 Report the maxima accumulated since the previous read, then rearm
-    // the latches at this second's values so they are never left reporting 0.
+    // #A7 Report the maxima since the previous data read. Before any second
+    // has landed in the new window, fall back to the last second's values so
+    // the fields never read 0.
     snap.noiseLASmaxHoldDb = hold_primed ? hold_lasmax_db : snap.noiseLASmaxDb;
     snap.noiseLCpeakHoldDb = hold_primed ? hold_lcpeak_db : snap.noiseLCpeakDb;
-    // Consume them only on a read the master can actually use. A master that
-    // polls unconditionally still gets status = 0 while the node is not ready,
-    // discards the frame, and would otherwise have thrown away every impulse
-    // accumulated before that invalid second. Rearming only when status = 1
-    // makes the latches lossless from the master's point of view.
+    // Consume the window only on a read the master can use (status 1). The
+    // next second then opens a fresh window: re-arming with the second just
+    // reported would put it in two consecutive reads and count every impulse
+    // twice.
     if (cmd == CMD_GET_DATA && status == 1) {
-        hold_lasmax_db = snap.noiseLASmaxDb;
-        hold_lcpeak_db = snap.noiseLCpeakDb;
+        hold_primed = false;
     }
     portEXIT_CRITICAL_SAFE(&cacheMux);
 
-    // #A5 Stamp the integrity field last, so it covers the hold values too.
-    // Bitwise over 84 bytes is ~10-20 us here, inside the slave callback and
-    // before the TX FIFO is filled. Negligible at one read per second; if a
-    // master ever polls at tens of Hz, swap in a 256-entry table.
+    // #A5 CRC last, so it also covers the hold values. Bitwise over 84 bytes
+    // is ~10-20 us; a 256-entry table would only pay off at tens of reads/s.
     snap.reserved = 0;
     snap.crc16 = sensordata_crc16(&snap, SENSORDATA_CRC_LEN);
-
-    float laeq = snap.noiseAvgDb;
-    float lafmax = snap.noisePeakDb;
-    float l10 = snap.noiseAvgLegalDb;
-    float l90 = (float)snap.lowNoiseLevel;
-    uint32_t rms_mv = snap.noise;
 
     switch (cmd) {
         case CMD_GET_STATUS:
@@ -260,21 +246,24 @@ void requestEvent() {
             Wire.write(id, 5);
             break;
         }
+        // Legacy single-value reads (float or uint32, little-endian).
         case CMD_LEGACY_GET_DB:
-            Wire.write((uint8_t *)&laeq, 4);
+            Wire.write((uint8_t *)&snap.noiseAvgDb, 4);
             break;
         case CMD_LEGACY_GET_RAW_MV:
-            Wire.write((uint8_t *)&rms_mv, 4);
+            Wire.write((uint8_t *)&snap.noise, 4);
             break;
         case CMD_LEGACY_GET_LMAX:
-            Wire.write((uint8_t *)&lafmax, 4);
+            Wire.write((uint8_t *)&snap.noisePeakDb, 4);
             break;
         case CMD_LEGACY_GET_L10:
-            Wire.write((uint8_t *)&l10, 4);
+            Wire.write((uint8_t *)&snap.noiseAvgLegalDb, 4);
             break;
-        case CMD_LEGACY_GET_L90:
+        case CMD_LEGACY_GET_L90: {
+            float l90 = (float)snap.lowNoiseLevel;
             Wire.write((uint8_t *)&l90, 4);
             break;
+        }
         default:
             Wire.write((uint8_t)0);
             break;
@@ -282,27 +271,35 @@ void requestEvent() {
 }
 
 void I2C_Comm_Init() {
-    // Load persistent calibration offset from NVS (0.0 if never set).
-    prefs.begin("noise", true); // read-only
-    calib_offset_db = prefs.getFloat("calib_db", 0.0f);
+    // Load the calibration offset, and reject a value out of range: before
+    // 3.3.1 any int16/100 (up to +-327 dB) could be stored, and a corrupted
+    // value would otherwise be applied to every reading after an upgrade.
+    prefs.begin("noise", false);
+    float v = prefs.getFloat("calib_db", 0.0f);
+    if (!calib_in_range(v)) {
+        Serial.printf("[INIT] NVS calibration offset %.2f dB out of range: "
+                      "discarded and cleared\n", v);
+        prefs.remove("calib_db");
+        v = 0.0f;
+    }
     prefs.end();
-    Serial.printf("[INIT] Calibration offset: %.2f dB (from NVS)\n", calib_offset_db);
+    calib_offset_db = v;
+    Serial.printf("[INIT] Calibration offset: %.2f dB (from NVS)\n", v);
 
     bool pins_ok = Wire.setPins(I2C_SDA, I2C_SCL);
-    
-    // Senior Programmer Note: Register callbacks BEFORE begin() to ensure 
-    // the hardware is ready to handle the very first transaction.
+
+    // Register the callbacks before begin(), so the first transaction already
+    // finds them. A slave does not set the bus clock: the master owns it.
     Wire.onReceive(receiveEvent);
     Wire.onRequest(requestEvent);
 
     bool i2c_ok = pins_ok && Wire.begin((uint8_t)I2C_ADDR_SLAVE);
-    
-    // Slave should NOT set the bus clock; it's controlled by the Master.
-    // Wire.setClock(100000); 
 
-    if (pins_ok && i2c_ok) {
-        Serial.printf("[INIT] I2C Slave OK addr=0x%02X SDA=%d SCL=%d\n", I2C_ADDR_SLAVE, I2C_SDA, I2C_SCL);
+    if (i2c_ok) {
+        Serial.printf("[INIT] I2C slave OK addr=0x%02X SDA=%d SCL=%d\n",
+                      I2C_ADDR_SLAVE, I2C_SDA, I2C_SCL);
     } else {
-        Serial.printf("[ERR] I2C Slave init failed SDA=%d SCL=%d\n", I2C_SDA, I2C_SCL);
+        Serial.printf("[ERR] I2C slave init failed SDA=%d SCL=%d\n",
+                      I2C_SDA, I2C_SCL);
     }
 }

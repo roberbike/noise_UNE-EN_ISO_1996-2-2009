@@ -24,15 +24,14 @@
  *
  * The per-second acoustic math is identical on both nodes; only the raw
  * acquisition differs (ADC polling vs I2S DMA) and the conversion from a
- * linear amplitude to dB SPL. This class owns everything that is shared:
- * LAeq/LAFmax, L10/L90 percentiles, Ld/Le/Ln period accumulation, Lden,
- * clipping gate, time-sync gate and the "hold last valid" policy — so a fix
- * lands in one place instead of two (previously duplicated in main.cpp and
- * main_i2s.cpp).
+ * linear amplitude to dB SPL. SampleChain does the per-sample work; this
+ * class does the per-second work: LAeq, LAFmax, LASmax, LCpeak, the L10/L90
+ * sliding window, Ld/Le/Ln and Lden, the validity gate and the "hold last
+ * valid" policy.
  *
- * Each platform's sampling_task calls process() once per second with the
- * second's aggregated energy. The amplitude->dB conversion is injected as a
- * function pointer (ADC: slope in mV + calibration; I2S: dBFS + sensitivity).
+ * Each node's aggregator task calls process() once per second. The
+ * amplitude->dB conversion is injected as a function pointer (ADC: mV and the
+ * calibration constant; I2S: dBFS and the microphone sensitivity).
  */
 
 // L10/L90 sliding-window length in seconds (one LAeq sample per second).
@@ -63,7 +62,6 @@ struct SecondInput {
     float peak_c;        // max |C-weighted sample| in the second (LCpeak)
     uint32_t samples;    // sample count actually accumulated this second
     bool input_valid;    // false if the raw input was dead/clipped this second
-    uint32_t clip_count; // samples that hit full scale this second (I2S)
 };
 
 class NoiseAggregator {
@@ -80,11 +78,13 @@ public:
     void begin(AmplitudeToDb to_db, float amp_scale, float min_amp,
                float int_scale = 1.0f);
 
-    // Called from the platform sampling_task once per completed second.
+    // Called from the aggregator task once per completed second.
     // Fills out with the current SensorData snapshot and mic_ok flag.
     // Returns true when the second was acoustically valid.
     // Period indicators (Ld/Le/Ln/Lden) are only computed once the master has
     // set the clock (I2C_Comm_TimeSynced()), avoiding accumulation into 1970.
+    // They are the running indices of the current EVALUATION DAY, which runs
+    // 07:00 -> 07:00 so that the night period (23:00-07:00) stays whole.
     bool process(const SecondInput &in, SensorData &out, uint8_t &mic_ok);
 
 private:
@@ -112,11 +112,12 @@ private:
     // function-local static: two aggregators would have shared the static one.
     float scratch_[AGG_WINDOW_SEC];
 
-    // Period accumulators
+    // Period accumulators for the current evaluation day, and its key
+    // (year * 1000 + day of year of local time shifted back 7 h).
     PeriodStats day_{};
     PeriodStats evening_{};
     PeriodStats night_{};
-    int last_mday_ = -1;
+    int last_eval_day_ = -1;
 };
 
 #endif // NOISE_AGGREGATOR_H
