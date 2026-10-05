@@ -52,7 +52,7 @@ una copia que el maestro lee bajo demanda. El código está organizado así:
 - `src/MIC_I2S.{h,cpp}` — driver del micrófono digital I2S.
 - `src/I2C_Comm.{h,cpp}` — protocolo esclavo I2C, contrato de estado,
   metadatos, hora y calibración persistente.
-- `examples/` — maestro de referencia y firmwares de calibración/verificación.
+- `examples/` — maestro de referencia, firmwares de calibración/verificación y **calibración automática I2S**.
 
 Cada nodo tiene dos tareas: una de muestreo, que pasa cada muestra por la
 cadena común, y una agregadora, que una vez por segundo calcula los
